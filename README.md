@@ -60,21 +60,21 @@ To find the latest version of EMBALMER, see [How](#how) above.
 Please contact Gabe Al-Ghalith or Dan Knights* (I'm sure you can find our contact info!)
 
 ## Woah (troubleshooting)
-1. I downloaded the program for my system but it won't run! Says "Permission denied" or "command not found" 
+1. *I downloaded the program for my system but it won't run! Says "Permission denied" or "command not found": *
 If on Linux or Mac, you may have to run the command "chmod +x" on the program first, and then run the program inside of the directory that contains it using a dot and slash before the name (for example, on Linux: "./embalm.linux" if the file "embalm.linux" is within the current working directory of the terminal). Another solution is to add the directory containing the program to the system PATH. This technique may vary by operating system and terminal type. 
 
-2. All queries align with 100% identity, many to the same strange reference sequence
+2. *All queries align with 100% identity, many to the same strange reference sequence: *
 Uh oh, looks like your database contains long series of "N"s (ambiguous bases). Because all ambiguities are resolved according to IUPAC standards, N actually matches perfectly to anything. For example, the nucleotide "K" matches "Y" but not "M," although "M" matches "Y". Although this opens up exciting new possibilities for leveraging ambiguity in aligning to SNP-aware databases, psuedo-clusters, and more, a stretch of 300 N's present in some poorly-curated databases will match any length-300 query perfectly. Disable this behavior by passing -n or --npenalize, which will force N's to be treated as mismatches against A, C, G, or T/U in the query. N will still be considered a match to any ambiguous nucleotides in the query. 
 
-3. I get "segmentation fault" or (other error message)
+3. *I get "segmentation fault" or (other error message): *
 This is likely a bug with embalmer! Please contact me with no less than the following and I'll try to fix it:
   - The exact command-line used to run the program
   - The version of emalmer used (run with -h to see help)
   - The operating system and amount of RAM (memory) in the computer running it
   - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce it. 
 
-4. I get no alignments with my amplicon reads, even though I know they're legit!
+4. *I get no alignments with my amplicon reads, even though I know they're legit: *
 Try reverse complementing. If that doesn't work, try removing sequencing platform adaptors and cleaning up the read with [a QC pipeline](https://github.com/knights-lab/shi7en), as well as reverse complementing if that still fails. 
 
-5. Other programs give me more alignments; how can you say this is optimal?
-More alignments doesn't mean correct alignments. Also be careful when comparing technologies. EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming (this is very much intentional and part of ensuring optimality of end-to-end alignments). Futher, embalmer does not perform dual-strand (+/-) alignment, as no reverse-complementing is performed. This is by design for amplicon studies which should be restricted to a single read orientation. 
+5. *Other program(s) give me more alignments; how can you say this is optimal?: *
+First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment if identity 97% spanning 97% of a query is actually 97% * 97% = ~94% identical to its matched reference over its whole length. Futher, embalmer does not perform dual-strand (+/-) alignment, as no reverse-complementing is performed. This is also by design for amplicon studies which must be restricted to a single (correct) read orientation. 
