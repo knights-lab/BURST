@@ -51,7 +51,7 @@ Other alignment modes, taxonomy parsing, tie-reporting, etc:
 - The default alignment mode, BEST, produces the single highest BLAST-id alignment possible in the database, breaking ties by choosing the very first occurrence (in input order) within the original input fasta database. 
   - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
 
-__More examples__
+__Favorite use cases__
 
 Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
 
