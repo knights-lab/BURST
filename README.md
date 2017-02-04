@@ -55,27 +55,27 @@ __More examples__
 
 Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
 
-1. Build a GG 97 database (optional, you can also search against raw fasta but this is faster)
+- Build a GG 97 database (optional, you can also search against raw fasta but this is faster)
 
 `embalm.mac --makedb QUICK 300 -r 97_otus.fasta -f -i 0.97 -o 97_otus-300`
 
-2. Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
+- Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
 `embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
 
-3. Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties!
+- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties!
 
 `embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST`
 
-4. As in (3) but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
+- As in previous but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
 
 `embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST --taxacut 5`
 
-5. Get a report of all ties for best match for every query. Get ready for a large output file.
+- Get a report of all ties for best match for every query. Get ready for a large output file.
 
 `embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m ALLPATHS`
 
-6. Like (5) ALLPATHS but now reports all matches above the identity threshold (here 98% for example) for every query.
+- Like previous (ALLPATHS) but now reports all matches above the identity threshold (here 98% for example) for every query.
 
 `embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m FORAGE -i .98`
 
