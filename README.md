@@ -66,12 +66,12 @@ If on Linux or Mac, you may have to run the command "chmod +x" on the program fi
 2. *All queries align with 100% identity, many to the same strange reference sequence:*
 Uh oh, looks like your database contains long series of "N"s (ambiguous bases). Because all ambiguities are resolved according to IUPAC standards, N actually matches perfectly to anything. For example, the nucleotide "K" matches "Y" but not "M," although "M" matches "Y". Although this opens up exciting new possibilities for leveraging ambiguity in aligning to SNP-aware databases, psuedo-clusters, and more, a stretch of 300 N's present in some poorly-curated databases will match any length-300 query perfectly. Disable this behavior by passing -n or --npenalize, which will force N's to be treated as mismatches against A, C, G, or T/U in the query. N will still be considered a match to any ambiguous nucleotides in the query. 
 
-3. *I get "segmentation fault" or (other error message):*
+3. *I get "segmentation fault" (or other crash):*
 This is likely a bug with embalmer! Please contact me with no less than the following and I'll try to fix it:
   - The exact command-line used to run the program
   - The version of emalmer used (run with -h to see help)
   - The operating system and amount of RAM (memory) in the computer running it
-  - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce it. 
+  - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce the DB. 
 
 4. *I get no alignments with my amplicon reads, even though I know they're legit:*
 Try reverse complementing. If that doesn't work, try removing sequencing platform adaptors and cleaning up the read with [a QC pipeline](https://github.com/knights-lab/shi7en), as well as reverse complementing if that still fails. 
