@@ -54,6 +54,8 @@ Other alignment modes, taxonomy parsing, tie-reporting, etc:
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's interpolated taxonomy is reported in column 13. 
 
+To find the latest version of EMBALMER, see [How](#how) above.
+
 ## Who
 Please contact Gabe Al-Ghalith or Dan Knights* (I'm sure you can find our contact info!)
 
