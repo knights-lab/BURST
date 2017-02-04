@@ -51,6 +51,33 @@ Other alignment modes, taxonomy parsing, tie-reporting, etc:
 - The default alignment mode, BEST, produces the single highest BLAST-id alignment possible in the database, breaking ties by choosing the very first occurrence (in input order) within the original input fasta database. 
   - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
 
+__More examples__
+Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
+
+1. Build a GG 97 database (optional, you can also search against raw fasta but this is faster)
+
+`embalm.mac --makedb QUICK 300 -r 97_otus.fasta -f -i 0.97 -o 97_otus-300`
+
+2. Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
+
+`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
+
+3. Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties!
+
+`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST`
+
+4. As in (3) but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
+
+`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST --taxacut 5`
+
+5. Get a report of all ties for best match for every query. Get ready for a large output file.
+
+`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m ALLPATHS`
+
+6. Like (5) ALLPATHS but now reports all matches above the identity threshold (here 98% for example) for every query.
+
+`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m FORAGE -i .98`
+
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's interpolated taxonomy is reported in column 13. 
 
