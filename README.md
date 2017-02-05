@@ -29,14 +29,13 @@ EMBALMER does not currently implement the following, although all these are plan
 ## How
 See [Releases](https://github.com/knights-lab/embalmer/releases) page for precompiled binaries for a variety of systems with no dependencies. Basically, just download one of the files on the releases page appropriate for your system (Windows, Linux, or Mac) and run it on the command line. If on Windows, pick an ".exe" version; if on macOS pick a ".mac" version; if on Linux pick a ".linux" version. If the default version (embalm.exe, embalm.mac, embalm.linux) doesn't work, try the corresponding version with ".older" in the name, and if that still doesn't work, try the one with ".buzzard." Please let me know if you can't get the program to run on your system. 
 
-__Easiest__ (avoid long reference sequences):
+### Easiest (avoid long reference sequences):
 `embalm -r myRefs.fasta -q myQueries.fasta -o myAlignments.b6`
 
-__Fastest__ (step 1: create database, step 2: use database for alignments):
-
+### Fastest (step 1: create database, step 2: use database for alignments):
 1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d QUICK 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d QUICK 125" and "-i 0.98" instead.*
 2. Run `embalm -r myRefs.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97` to generate a database.
-3. (optional, advanced) To refine the database, when clustering and DB generation finishes, note the number of empties on the line "There are 634 links (_._) and _ empties (0.XXXX)". If the proportion of empty clusters 0.XXX is higher than 0.33, you might want to raise the clustering radius higher than the chosen default X indicated on the line "Average coverage (atomic) = _._, cluster radius: X". Doubling it would be a good start. Conversely, if you have insufficient memory to cluster, consider reducing the cluster radius or starting with something low like 3.
+3. (optional, advanced) To refine the database, when clustering and DB generation finishes, note the number of empties on the line "There are _ links (_._) and _ empties (0.XXXX)". If the proportion of empty clusters 0.XXX is higher than 0.33, you might want to raise the clustering radius higher than the chosen default X indicated on the line "Average coverage (atomic) = _._, cluster radius: X". Doubling it would be a good start. Conversely, if you have insufficient memory to cluster, consider reducing the cluster radius or starting with something low like 3.
 4. Use the database for all future alignments: `embalm -r MyDB.edb -q MyQueries.fasta -o myAlignments.b6 -f`
 
 Other alignment modes, taxonomy parsing, tie-reporting, etc:
@@ -51,33 +50,31 @@ Other alignment modes, taxonomy parsing, tie-reporting, etc:
 - The default alignment mode, BEST, produces the single highest BLAST-id alignment possible in the database, breaking ties by choosing the very first occurrence (in input order) within the original input fasta database. 
   - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
 
-__Favorite use cases__
+__Dan's Faves__
 
 Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
 
-- Build a GG 97 database (optional, you can also search against raw fasta but this is faster)
-
-`embalm.mac --makedb QUICK 300 -r 97_otus.fasta -f -i 0.97 -o 97_otus-300`
+- [Build a database](#fastest) (optional, you can also search against raw fasta but this is faster)
 
 - Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
-`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
 
 - Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties!
 
-`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m CAPITALIST`
 
 - As in previous but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
 
-`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m CAPITALIST --taxacut 5`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m CAPITALIST --taxacut 5`
 
 - Get a report of all ties for best match for every query. Get ready for a large output file.
 
-`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m ALLPATHS`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m ALLPATHS`
 
 - Like previous (ALLPATHS) but now reports all matches above the identity threshold (here 98% for example) for every query.
 
-`embalm.mac -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy 97_otu_taxonomy.txt -m FORAGE -i .98`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m FORAGE -i .98`
 
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's interpolated taxonomy is reported in column 13. 
