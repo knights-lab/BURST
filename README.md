@@ -55,25 +55,27 @@ Note: Please be sure to use -n in most cases to penalize matching to Ns and ambi
 
 - [Build a database](#fastest-step-1-create-database-step-2-use-database-for-alignments) (optional, you can also search against raw fasta but this is faster)
 
+`embalm -r myRefs.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
+
 - Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
 `embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
 
-- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties!
+- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties! (Cleaned-up universal taxonomy file for any Greengenes level can be found in [Releases](https://github.com/knights-lab/embalmer/releases).)
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m CAPITALIST`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST`
 
 - As in previous but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m CAPITALIST --taxacut 5`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST --taxacut 5`
 
 - Get a report of all ties for best match for every query. Get ready for a large output file.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m ALLPATHS`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m ALLPATHS`
 
 - Like previous (ALLPATHS) but now reports all matches above the identity threshold (here 98% for example) for every query.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy GG_taxonomy.txt -m FORAGE -i .98`
+`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m FORAGE -i .98`
 
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's interpolated taxonomy is reported in column 13. 
