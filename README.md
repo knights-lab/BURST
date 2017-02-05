@@ -54,7 +54,7 @@ __Dan's Faves__
 
 Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
 
-- [Build a database](#fastest) (optional, you can also search against raw fasta but this is faster)
+- [Build a database](#fastest-step-1-create-database-step-2-use-database-for-alignments) (optional, you can also search against raw fasta but this is faster)
 
 - Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
