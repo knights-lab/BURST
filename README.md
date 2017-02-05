@@ -51,11 +51,11 @@ Other alignment modes, taxonomy parsing, tie-reporting, etc:
   - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
 
 ### Dan's Faves
-Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise everthing will hit reads with long stretches of Ns in them.
+Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise, depending on your database, everthing may hit reads with long stretches of Ns in them. The following examples work with Greengenes representative cluster sequences (rep_set). 
 
 - [Build a database](#fastest-step-1-create-database-step-2-use-database-for-alignments) (optional, you can also search against raw fasta but this is faster)
 
-`embalm -r myRefs.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
+`embalm -r 97_otus.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
 
 - Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
