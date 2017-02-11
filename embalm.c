@@ -80,17 +80,17 @@ long REBASE_AMT = 250, DB_QLEN = 500;
 #define VECSZ 16
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	puts("\nEMBALMER aligner (IMB_All-mer v0.99.1b) by Gabe."); \
+	puts("\nEMBALMER aligner (IMB_All-mer v0.99.1c) by Gabe."); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	puts("\nRequired parameters:");\
 	puts("--references (-r) <name>: FASTA file of reference sequences to search");\
 	puts("--queries (-q) <name>: FASTA file of queries to match against references");\
 	puts("--output (-o) <name>: Text file for writing results (BLAST-like tdf)");\
 	puts("\nBehavior parameters:"); \
-	puts("--whitespace (-w): write full query names in output (with whitespace)"); \
+	puts("--whitespace (-w): write full query names in output (incl. whitespace)"); \
 	puts("--npenalize (-n): Make A,C,G,T,U in query not match X,N in reference"); \
 	puts("--xalphabet (-x): Allow any alphabet and disable ambiguity matching");\
-	puts("--taxonomy (-b) <name>: assign taxonomy from file. Needs -m CAPITALIST");\
+	puts("--taxonomy (-b) <name>: assign taxonomy w/file. Interpolate with -m CAPITALIST");\
 	puts("--mode (-m) <name>: Operating mode. [BEST] Pick one of these:");\
 	puts("  BEST (reports first best match by hybrid BLAST id)"); \
 	puts("  ALLPATHS (reports all ties with same error profile)"); \
@@ -105,6 +105,8 @@ long REBASE_AMT = 250, DB_QLEN = 500;
 	/*printf("--accelerator (-a) <name>: Create or use a helper DB\n");*/ \
 	printf("\nPerformance parameters:\n"); \
 	printf("--taxacut (-bc) <int>: ignore 1/[%u] disagreeing taxonomy calls\n",TAXACUT); \
+	printf("--taxa_ncbi (-bn): Assume NCBI header '>xxx|accsn...' for taxonomy\n"); \
+	printf("--taxasuppress (-bs) [STRICT]: Adjust taxonomy calls by %%ID\n"); \
 	printf("--id (-i) <decimal>: similarity (range 0-1) needed to report match [%.2f]\n",THRES);\
 	printf("--threads (-t) <int>: How many processors to use [%u]\n",THREADS);\
 	printf("--shear (-s) [len]: Shear references longer than len bases [%ld]\n",REBASE_AMT);\
@@ -201,6 +203,10 @@ typedef struct {
 } PackaPrince;
 
 typedef struct {char *Head, *Tax;} TaxPair_t;
+                           //K    P     C     O     F     G     S     SS+
+float TAXLEVELS_STRICT[] = {.65f, .75f, .78f, .82f, .86f, .94f, .98f, .995f},
+	 TAXLEVELS_LENIENT[] = {.55f, .70f, .75f, .80f, .84f, .93f, .97f, .985f},
+	 *TAXLEVELS = TAXLEVELS_LENIENT;
 
 typedef struct {
 	char **RefHead, **RefSeq;
@@ -219,7 +225,7 @@ typedef struct {
 	char **QHead, **QSeq;
 	uint32_t *QLen, *Divergence, *NewIX;
 	uint32_t totQ, numUniqQ, maxLenQ;
-	int incl_whitespace;
+	int incl_whitespace, taxasuppress;
 
 	PackaPrince FingerprintsQ;
 } Query_Data;
@@ -235,7 +241,8 @@ void * calloc_a(size_t algn, size_t size, void **oldPtr) {
     return (void *)(((uintptr_t)*oldPtr+algn-1) & mask);
 }
 
-inline char * taxa_lookup(char *key, uint32_t sz, TaxPair_t *Dict) {
+char NULLTAX[1] = {0};
+static char * taxa_lookup_generic(char *key, uint32_t sz, TaxPair_t *Dict) {
 	TaxPair_t *p = Dict;
 	while (sz) {
 		uint32_t w = sz >> 1; 
@@ -247,9 +254,29 @@ inline char * taxa_lookup(char *key, uint32_t sz, TaxPair_t *Dict) {
 	}
 	char *ref_s = p->Head, *key_s = key;
 	while (*ref_s == *key_s++) if (!*ref_s++) return p->Tax;
-	return 0;
+	return NULLTAX;
 	//return p->Tax; // replace last 3 lines for unsafe ver
 }
+static char * taxa_lookup_ncbi(char *key, uint32_t sz, TaxPair_t *Dict) {
+	TaxPair_t *p = Dict;
+	int in = 0;
+	while (sz) {
+		uint32_t w = sz >> 1; 
+		char *ref_s = p[w+1].Head, *key_s = key + 4;
+		while (*ref_s == *key_s++) if (!*ref_s++) return p[w+1].Tax; 
+		if (*(key_s-1) == '.' && !*ref_s) return p[w+1].Tax;
+		char keyLast = *(key_s-1) == '.' ? 0 : *(key_s-1);
+		if (*ref_s < keyLast) { p+=w+1; sz-=w+1; }
+		else sz = w;
+	}
+	char *ref_s = p->Head, *key_s = key + 4;
+	while (*ref_s == *key_s++) if (!*ref_s++) return p->Tax;
+	if (*(key_s-1) == '.' && !*ref_s) return p->Tax;
+	return NULLTAX;
+	//return p->Tax; // replace last 3 lines for unsafe ver
+}
+
+char * (*taxa_lookup)(char *, uint32_t, TaxPair_t *) = taxa_lookup_generic;
 
 size_t parse_taxonomy(char *filename, TaxPair_t **Obj) {
 	static const size_t linelen = 10000000; //1k entries, 10 meg line lines
@@ -1620,12 +1647,13 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				uint32_t *TmpRIX = Rd->TmpRIX, *NewOrig = malloc(Rd->origTotR*sizeof(*NewOrig)),
 					*NewDedup = Rd->RefIxSrt, *RefDedupIx = Rd->RefDedupIx;
 				if (!NewOrig) {fputs("OOM:NewOrig:BFP\n",stderr); exit(3);}
-				for (uint32_t i = 0, j = 0; i < totR; ++i) {
+				uint32_t j = 0; for (uint32_t i = 0; i < totR; ++i) {
 					NewDedup[i] = j;
 					for (uint32_t z = RefDedupIx[WordRange[i]]; z < RefDedupIx[WordRange[i]+1]; ++z)
 						NewOrig[j++] = TmpRIX[z];
 				}
-				NewDedup[totR] = totR;
+				if (j < Rd->origTotR) puts("Coalescing origin..."), NewOrig[j] = TmpRIX[Rd->origTotR-1];
+				NewDedup[totR] = Rd->origTotR;
 				free(Rd->TmpRIX);
 				Rd->RefDedupIx = NewDedup, Rd->TmpRIX = NewOrig;
 				for (uint32_t i = 0; i < totR; ++i) RefDedupIx[i] = NewOrig[NewDedup[i]];
@@ -1810,7 +1838,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 					}
 					if (z != VECSZ-2) {
 						printf("\nCluster pool depleted"); 
-						goto FP_ENDGAME; 	
+						goto FP_ENDGAME; 
 					}
 					min = FP_pop(&centroid); 
 					continue;
@@ -1839,7 +1867,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		free(CC);
 		free(Connectivity); // reuse Connectivity for new RefIXSrt, free old RefIXSrt
 		free(SrtIx_cent);
-		
 		//#pragma omp sections
 		{
 			//#pragma omp section
@@ -1847,12 +1874,24 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				uint32_t *TmpRIX = Rd->TmpRIX, *NewOrig = malloc(Rd->origTotR*sizeof(*NewOrig)),
 					*NewDedup = Rd->RefIxSrt, *RefDedupIx = Rd->RefDedupIx;
 				if (!NewOrig) {fputs("OOM:NewOrig\n",stderr); exit(3);}
-				for (uint32_t i = 0, j = 0; i < totR; ++i) {
+				uint32_t j = 0; for (uint32_t i = 0; i < totR; ++i) {
 					NewDedup[i] = j;
+					//printf("clusIX[%u] = %u\n",i, ClusIX[i]);
 					for (uint32_t z = RefDedupIx[ClusIX[i]]; z < RefDedupIx[ClusIX[i]+1]; ++z)
 						NewOrig[j++] = TmpRIX[z];
 				}
-				NewDedup[totR] = totR;
+				/* printf("totR = %u, Final value of j = %u; NewDedup[totR-1] = %u\n", totR, j, NewDedup[totR-1]);
+				printf("NewOrig[j-1] = %u, NewOrig[j] = %u\n",NewOrig[j-1], NewOrig[j]);
+				uint8_t *BinUp = calloc(Rd->origTotR,1);
+				for (uint32_t i = 0; i < Rd->origTotR-1; ++i) {
+					++BinUp[NewOrig[i]];
+				}
+				for (uint32_t i = 0; i < Rd->origTotR; ++i) {
+					if (!BinUp[i]) printf("Lacking representation at %u\n",i);
+				}
+				printf("last TmpRIX = %u\n",TmpRIX[Rd->origTotR-1]); */
+				if (j < Rd->origTotR) puts("Coalescing..."), NewOrig[j] = TmpRIX[Rd->origTotR-1];
+				NewDedup[totR] = Rd->origTotR;
 				free(Rd->TmpRIX);
 				Rd->RefDedupIx = NewDedup, Rd->TmpRIX = NewOrig;
 				for (uint32_t i = 0; i < totR; ++i) RefDedupIx[i] = NewOrig[NewDedup[i]];
@@ -1904,14 +1943,14 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		ClumpLen[i] = clen;
 	}
 	ClumpLen[numRclumps] = 0; // endpiece
-	for (uint32_t i = numRclumps*VECSZ; i < Rd->totR; ++i)
+	for (uint32_t i = numRclumps*VECSZ; i < Rd->totR; ++i) {
 		if (Rd->RefLen[Rd->RefIxSrt[i]] > ClumpLen[numRclumps]) 
 			ClumpLen[numRclumps] = Rd->RefLen[Rd->RefIxSrt[i]];
-	
+	}
 	// report the average clump length. 
 	uint64_t tot_cl = 0;
 	for (uint32_t i = 0; i < totRC; ++i) tot_cl += ClumpLen[i];
-	printf("Average R pack length = %f\n", (double)tot_cl/numRclumps);
+	printf("Average R pack length = %f\n", (double)tot_cl/totRC);
 
 	// add references to clumps (TODO: NUMA-aware, first-touch/threadlocal?)
 	DualCoil **RefClump = malloc(totRC*sizeof(*RefClump));
@@ -1933,7 +1972,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 	if (totRC > numRclumps) {
 		RefClump[numRclumps] = malloc(ClumpLen[numRclumps]*sizeof(*RefClump[numRclumps]));
 		if (!RefClump[numRclumps]) {fputs("OOM:RefClump[numRclumps]\n",stderr); exit(3);}
-	
 		for (uint32_t j = 0; j < ClumpLen[numRclumps]; ++j) {
 			for (uint32_t k = 0; k < Rd->totR-numRclumps*VECSZ; ++k) { // parse letter j across refs
 				if (Rd->RefLen[Rd->RefIxSrt[numRclumps*VECSZ+k]] >= j) 
@@ -2172,6 +2210,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 	Prince *Centroids = RefDat.Centroids, *RP = 0; 
 	uint32_t taxa_parsed = RefDat.taxa_parsed; 
 	TaxPair_t *Taxonomy = RefDat.Taxonomy;
+	int taxasuppress = QDat.taxasuppress;
 
 	// Prepare dimensions, bounds
 	uint32_t qdim = maxLenQ + 1, rdim = maxLenR + 1;
@@ -2530,12 +2569,12 @@ if (RUNMODE == MATRIX) {
 free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 
 #define PRINT_MATCH() \
-	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n", \
+	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", \
 		QHead[NewIX[j]], RefHead[rix], rp->score * 100, \
 		alLen, numMis, numGap, 1, QLen[NewIX[j]], stIxR, rp->finalPos + mOff, \
 		rp->mismatches,j > Offset[i]);
 #define PRINT_MATCH_TAX() \
-	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\n", \
+	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\t%s\n", \
 		QHead[NewIX[j]], RefHead[rix], rp->score * 100, \
 		alLen, numMis, numGap, 1, QLen[NewIX[j]], stIxR, rp->finalPos + mOff, \
 		rp->mismatches,j > Offset[i],FinalTaxon);
@@ -2561,8 +2600,16 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 							rix = TmpRIX[k];
 							mOff = RefStart ? RefStart[rix] : 0;
 							stIxR = rp->finalPos - QLen[NewIX[Offset[i]]] - rp->numGapR + mOff;
-							for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+							if (taxa_parsed) {
+								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+							}
+							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 						}
+					else if (taxa_parsed) {
+						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+						for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+					}
 					else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 				}
 				rp = rp->next;
@@ -2585,8 +2632,16 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 							rix = TmpRIX[k];
 							mOff = RefStart ? RefStart[rix] : 0;
 							stIxR = rp->finalPos - QLen[NewIX[Offset[i]]] - rp->numGapR + mOff;
-							for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+							if (taxa_parsed) {
+								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+							}
+							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 						}
+					else if (taxa_parsed) {
+						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+						for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+					}
 					else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 				}
 				rp = rp->next;
@@ -2595,10 +2650,11 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 	}
 	else if (RUNMODE==CAPITALIST) {
 		size_t *RefCounts = calloc(totR,sizeof(*RefCounts)), tot = 0;
-		char **Taxa = 0, *Taxon = 0, *FinalTaxon = 0; uint32_t *Divergence = 0; // taxa stuff
+		char **Taxa = 0, *Taxon = 0, *FinalTaxon = 0; uint32_t *Divergence = 0; //, *Dp = 0; 
 		if (taxa_parsed) 
 			Taxa = malloc(totR*sizeof(*Taxa)), 
 			Taxon = malloc(1000000),
+			/*Dp = malloc(totR*sizeof(*Dp)),*/
 			Divergence = malloc(totR*sizeof(*Divergence)), *Divergence = 0;
 	 	for (uint32_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = FinalPod[i], *best = rp;
@@ -2620,11 +2676,22 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 			ResultPod *rp = FinalPod[i];
 			ResultPod *best = rp;
 			uint32_t tix = 0;
-			if (taxa_parsed) Taxa[tix++] = taxa_lookup(RefHead[RefIxSrt[rp->refIx]],
-				taxa_parsed-1, Taxonomy);
+			float best_score;
+
+			if (taxa_parsed) {
+				if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) 
+					Taxa[tix++] = taxa_lookup(RefHead[TmpRIX[k]], taxa_parsed-1, Taxonomy);
+				else Taxa[tix++] = taxa_lookup(RefHead[RefIxSrt[rp->refIx]], taxa_parsed-1, Taxonomy);
+				best_score = rp->score;
+			}
+				
 			while (rp = rp->next) if (rp->mismatches == best->mismatches) {
-				if (taxa_parsed) Taxa[tix++] = taxa_lookup(RefHead[RefIxSrt[rp->refIx]],
-					taxa_parsed-1, Taxonomy);
+				if (taxa_parsed) {
+					if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) 
+						Taxa[tix++] = taxa_lookup(RefHead[TmpRIX[k]], taxa_parsed-1, Taxonomy);
+					else Taxa[tix++] = taxa_lookup(RefHead[RefIxSrt[rp->refIx]], taxa_parsed-1, Taxonomy);
+					if (rp->score > best_score) best_score = rp->score;
+				}
 				if ( (RefCounts[rp->refIx] > RefCounts[best->refIx]) || 
 					(RefCounts[rp->refIx] == RefCounts[best->refIx] && 
 						RefIxSrt[rp->refIx] < RefIxSrt[best->refIx]) )
@@ -2632,24 +2699,25 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 			} 
 			// taxonomy interpolation pass (optional)
 			if (taxa_parsed) {
-				if (tix==1) {FinalTaxon = *Taxa; goto END_CAP_TAX;}
-				//Qs3w(Taxa, tix, 0);
+				uint32_t lv = -1;
+				if (tix==1) {FinalTaxon = strcpy(Taxon,*Taxa); goto END_CAP_TAX;}
 				int byStr(const void *A, const void *B) {return strcmp(*(char**)A, *(char**)B);}
 				qsort(Taxa, tix, sizeof(*Taxa), byStr);
+
 				uint32_t maxDiv = 0;
 				for (int z = 1, x; z < tix; ++z) {
 					Divergence[z] = 0;
 					for (x = 0; Taxa[z-1][x] && Taxa[z-1][x]==Taxa[z][x]; ++x) 
 						Divergence[z] += Taxa[z][x] == ';';
-					Divergence[z] += !Taxa[z-1][x]; // && (!Taxa[z][x] || Taxa[z][x] == ';');
+					Divergence[z] += !Taxa[z-1][x];
 					if (Divergence[z] > maxDiv) maxDiv = Divergence[z];
 				}
 				if (!maxDiv) {Taxon[0] = 0; FinalTaxon = Taxon; goto END_CAP_TAX;}
 
 				// Ascend tree based on divergences
 				uint32_t cutoff = tix - tix/TAXACUT; // need 90% support?
-				//printf("Query: %s, cutoff = %u\n", QHead[NewIX[Offset[i]]], cutoff);
-				uint32_t st = 0, ed = tix, lv;
+				//printf("    Query: %s, cutoff = %u, tix = %u\n", QHead[NewIX[Offset[i]]], cutoff, tix);
+				uint32_t st = 0, ed = tix;
 				for (lv = 1; lv <= maxDiv; ++lv) {
 					uint32_t accum = 1;
 					for (uint32_t z = st+1; z < ed; ++z) {
@@ -2657,8 +2725,8 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 						else if (accum >= cutoff) {ed = z; break;}
 						else accum = 1, st = z; //, printf("reset z=%u, lv %u: %u < %u\n",z,lv,accum,cutoff);
 					}
-					if (accum < cutoff) {/*--lv;*/ break;}
-					cutoff = (ed - st) - (ed-st)/TAXACUT;
+					if (accum < cutoff) break;
+					cutoff = accum - accum/TAXACUT;
 				}
 				//for (int b = 0; b < tix; ++b) printf("%d: [%u] %s\n", b, Divergence[b], Taxa[b]); 
 				
@@ -2669,9 +2737,20 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 					Taxon[st] = Taxa[ed][st];
 				Taxon[st] = 0;
 				FinalTaxon = Taxon;
-				//printf("--> [ed=%u, lv=%u, cut=%u] %s\n\n",ed, lv, cutoff, FinalTaxon);
+				//printf("--> [ed=%u, lv=%u, cut=%u] %s\n",ed, lv, cutoff, FinalTaxon);
+				END_CAP_TAX:
+				if (taxasuppress) {
+					uint32_t lm, s = 0; 
+					for (lm = 0; lm < lv && TAXLEVELS[lm] < best_score; ++lm);
+					if (!lm) FinalTaxon = NULLTAX;
+					else if (lm < lv) for (int x = 0; FinalTaxon[x]; ++x) 
+						if (FinalTaxon[x]==';' && ++s == lm) {
+							FinalTaxon[x] = 0; break;
+						}
+					//printf("--> Best score = %f, lim= %d/%d, newtax = %s\n",best_score,lm,lv, FinalTaxon);
+				}
 			}
-			END_CAP_TAX:
+			
 			// pass 4: printing dividend reports
 			rp = best; // recovering hedge fund
 			uint32_t rix = RefIxSrt[rp->refIx], 
@@ -2687,6 +2766,7 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 	}
 	else if (RUNMODE == BEST) {  // find first best score on min ED path
 		//float e = FLT_EPSILON; int sim;
+		char Taxon[UINT16_MAX] = {0}, *FinalTaxon = 0;
 	 	for (uint32_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = FinalPod[i];
 			ResultPod *best = rp;
@@ -2705,7 +2785,23 @@ free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 				alLen = QLen[NewIX[Offset[i]]] + numGap,
 				mOff = RefStart ? RefStart[rix] : 0,
 				stIxR = rp->finalPos - QLen[NewIX[Offset[i]]] - rp->numGapR + mOff;
-				for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+				if (taxa_parsed) {
+					char *tt = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+					if (taxasuppress) {
+						uint32_t lm, s = 0; 
+						strcpy(Taxon, tt);
+						for (lm = 0; TAXLEVELS[lm] < rp->score; ++lm);
+						if (!lm) FinalTaxon = NULLTAX;
+						else for (int x = 0; Taxon[x]; ++x) {
+							if (Taxon[x]==';' && ++s == lm) {
+								Taxon[x] = 0; break;
+							}
+							FinalTaxon = Taxon;
+						}
+					} else FinalTaxon = tt;
+					for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+				}
+				else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 			}
 		} 
 	}
@@ -2802,6 +2898,19 @@ int main( int argc, char *argv[] ) {
 			if (temp < 2) {fputs("ERROR: taxacut must be >= 2\n",stderr); exit(1);}
 			TAXACUT = temp;
 			printf(" --> Ignoring 1/%d disagreeing taxonomy calls\n",TAXACUT);
+		}
+		else if (!strcmp(argv[i],"--taxa_ncbi") || !strcmp(argv[i],"-bn")) {
+			taxa_lookup = taxa_lookup_ncbi;
+			printf(" --> Using NCBI header formatting for taxonomy lookups.\n");
+		}
+		else if (!strcmp(argv[i],"--taxasuppress") || !strcmp(argv[i],"-bs")) {
+			QDat.taxasuppress = 1;
+			if (i + 1 != argc && argv[i+1][0] != '-') { // arg provided
+				if (!strcmp(argv[++i],"STRICT")) TAXLEVELS = TAXLEVELS_STRICT;
+				else {fprintf(stderr,"ERROR: Unrecognized taxasuppress '%s'\n",argv[i]); exit(1);}
+			}
+			printf(" --> Surpressing taxonomic specificity by alignment identity%s.\n",
+				TAXLEVELS == TAXLEVELS_STRICT ? " [STRICT]" : "");
 		}
 		else if (!strcmp(argv[i],"--id") || !strcmp(argv[i],"-i")) {
 			if (++i == argc || argv[i][0] == '-') 
