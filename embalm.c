@@ -80,7 +80,7 @@ long REBASE_AMT = 250, DB_QLEN = 500;
 #define VECSZ 16
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	puts("\nEMBALMER aligner (IMB_All-mer v0.99.1c) by Gabe."); \
+	puts("\nEMBALMER aligner (IMB_All-mer v0.99.1d) by Gabe."); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	puts("\nRequired parameters:");\
 	puts("--references (-r) <name>: FASTA file of reference sequences to search");\
@@ -187,6 +187,7 @@ typedef struct {
 typedef union {
 	uint8_t a[32];
 	uint16_t h[16];
+	uint32_t s[8];
 	uint64_t w[4];
 	// #ifdef __AVX2__
 	// __m256i v;
@@ -1604,17 +1605,20 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		printf("How many fingerprints made = %u\n",Fp.nf);
 		if (Z) { // Cluster by N-free profile if N-penalize
 			puts("WARNING: penalizing N's in fingerprint creation may lead to bad non-penalized alignments.");
-			Prince t;
-			for (uint32_t i = 0; i < Rd->totR; ++i) t = p[i], p[i] = p[Fp.Ptrs[i]], p[Fp.Ptrs[i]] = t; // swap FPs
 		}
+		Prince t; // New: swap to error-free fingerprints anyway (higher quality clusters for N-case and without)
+		for (uint32_t i = 0; i < Rd->totR; ++i) t = p[i], p[i] = p[Fp.Ptrs[i]], p[Fp.Ptrs[i]] = t; // swap FPs
+		
 		// prelim stats: individual coverage.
 		uint32_t *RefIxSrt = Rd->RefIxSrt, *RefLen = Rd->RefLen, totR = Rd->totR;
 		
 		uint64_t tot_cl = 0;
+		double similarity = 0.06;
 		#pragma omp parallel for reduction(+:tot_cl)
 		for (uint32_t i = 0; i < totR; ++i) tot_cl += FP_pop(p+i);
-		uint32_t sig_thres = Rd->clustradius ?: 1 + 0.06 * (double)tot_cl/totR;
+		uint32_t sig_thres = Rd->clustradius ?: 1 + similarity * (double)tot_cl/totR;
 		if (!Rd->clustradius && sig_thres < 5) sig_thres = 5;
+		else if (sig_thres > 999) similarity = (double)(sig_thres-1000)/1000, sig_thres = 0;
 		printf("Average coverage (atomic) = %f, cluster radius: %u\n",(double)tot_cl/totR, sig_thres);
 		#define PTHRES 235
 		#define PTHRES2 240
@@ -1631,15 +1635,20 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			uint32_t b = 0, z = totR;
 			//for (uint32_t z = 1, b = 0; z <= totR; ++z) {
 				//if (z == totR || RefLen[RefIxSrt[z]] > RefLen[RefIxSrt[b]] + LATENCY) {
-					uint32_t Pops[UINT16_MAX+2] = {0}, *Cnt_p = Pops + 1;
+					size_t pow = 24, binCnt = 1 << pow, rem = 32-pow;
+					uint32_t *Pops = calloc(binCnt+2,sizeof(*Pops)), *Cnt_p = Pops + 1;
+					//#pragma omp parallel for
 					for (uint32_t i = b; i < z; ++i)
-						++Cnt_p[*p[i].h];
+						//#pragma omp atomic
+						++Cnt_p[*p[i].s>>rem];
 					--Cnt_p;
-					for (uint32_t i = 1; i < UINT16_MAX+2; ++i) 
+					for (uint32_t i = 1; i < binCnt+2; ++i) 
 						Cnt_p[i] += Cnt_p[i-1];
 					for (uint32_t i = b; i < z; ++i)
-						WordRange[Cnt_p[*p[i].h]+++b] = i;
+						WordRange[Cnt_p[*p[i].s>>rem]+++b] = i;
 					b = z;
+					free(Pops);
+					puts("Prepared cluster bands");
 				//}
 			//}
 			// Reorganize fingerprints as well as the original references (RIX, TmpRIX, dedup)
@@ -1706,7 +1715,8 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			#pragma omp for schedule(static,1) reduction(+:numLinks)
 			for (uint32_t i = 0; i < totR; ++i) {
 				// Get all the acceptable unions for this reference
-				uint32_t cpop = FP_pop(p+i), st = cpop + sig_thres, x = 0;
+				uint32_t cpop = FP_pop(p+i), x = 0,
+					st = cpop + (sig_thres ?: similarity * cpop);
 				if (cpop > PTHRES) continue; // otherwise they'll match mostly anything
 				st = MIN(st,PTHRES2); // FPs aren't useful past this range
 				uint32_t bounds = MIN(totR, (i+1)+BANDED_FP);
@@ -1926,6 +1936,17 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				p = NewP; 
 				Fp.initP = Fp.P = p;
 				Fp.Ptrs = NewPix;
+				if (!Z) {
+					Prince t; // New: swap back error-free fingerprints; re-calc centroids
+					for (uint32_t i = 0; i < totR; ++i) t = p[i], p[i] = p[Fp.Ptrs[i]], p[Fp.Ptrs[i]] = t;
+					for (uint32_t i = 0; i < totRC; ++i) {
+						Prince NC = p[i*VECSZ];
+						for (uint32_t j = i*VECSZ+1; j < (i+1)*VECSZ; ++j) 
+							NC = FP_combine(NC,p[j]);
+						UnionPrince[i] = NC;
+					}
+				}
+				
 				Rd->FingerprintsR = Fp;
 				Rd->Centroids = UnionPrince;
 			//}
@@ -2106,7 +2127,7 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 
 	Prince *Centroids = 0; 
 	void *init_FP = 0; Prince *FullPrince = 0;
-	uint32_t numFPs=0, unAmbig = 0, *FP_ptrs = 0;
+	uint32_t R=0, numFPs=0, unAmbig = 0, *FP_ptrs = 0;
 	if (DO_FP) {
 		printf(" --> EDB: Fingerprinting is enabled ");
 		Centroids = malloc(numRclumps*sizeof(*Centroids));
@@ -2114,7 +2135,7 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 		fread(Centroids, sizeof(*Centroids), numRclumps, in);
 		if (dbVer) { // DB version > 0 [check individual bit?]
 			fread(&numFPs, sizeof(numFPs), 1, in);
-			if (!numFPs) numFPs = totR, printf("[RESTRICTED DB] ");
+			if (!numFPs) numFPs = totR, R = 1, printf("[RESTRICTED DB] ");
 			else {
 				FP_ptrs = malloc(totR*sizeof(*FP_ptrs));
 				if (!FP_ptrs) {fputs("OOM:read_edb\n",stderr); exit(3);}
@@ -2138,7 +2159,7 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 	Rd->Centroids = Centroids;
 	Rd->FingerprintsR.P = FullPrince;
 	Rd->FingerprintsR.Ptrs = FP_ptrs;
-	Rd->FingerprintsR.nf = numFPs; 
+	Rd->FingerprintsR.nf = R ? 0 : numFPs; 
 	Rd->FingerprintsR.initP = init_FP;
 	printf(" --> EDB: %u refs [%u orig], %u clumps, %u maxR\n",
 		totR, origTotR, numRclumps, maxLenR);
