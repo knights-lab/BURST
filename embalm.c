@@ -1732,7 +1732,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		{
 			Split *CCL = malloc(totR*sizeof(*CCL));
 			if (!CCL) {fputs("OOM:CCL\n",stderr); exit(3);}
-			#pragma omp for schedule(static,1) reduction(+:numLinks)
+			#pragma omp for schedule(dynamic,1) reduction(+:numLinks)
 			for (uint32_t i = 0; i < totR; ++i) {
 				// Get all the acceptable unions for this reference
 				uint32_t cpop = FP_pop(p+i), x = 0,
@@ -2962,6 +2962,7 @@ if (DO_ACCEL) {
 		free(Hash); free(Refs);
 	}
 	printf("\rSearch Progress: [100.00%%]\n");
+	free(*Forest); free(Forest); free(BadList); // NEW [mem]
 } // end ACCEL
 // do remaining bad queries vs all refs in traditional aligner. 
 // how? redefine what the loop uses as its query bin and its query bounds?
@@ -3321,7 +3322,7 @@ if (DO_ACCEL) {
 			if (taxa_parsed) for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
 			else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 		}
-		free(RefCounts), free(Taxa), free(Taxon), free(Divergence);
+		//free(RefCounts), free(Taxa), free(Taxon), free(Divergence);
 	}
 	else if (RUNMODE == BEST) {  // find first best score on min ED path
 		//float e = FLT_EPSILON; int sim;
@@ -3565,13 +3566,15 @@ int main( int argc, char *argv[] ) {
 		if (!REBASE) DB_QLEN = 0;
 		if (isRefEDB(ref_FN)) {fputs("ERROR: DBs can't make DBs.\n",stderr); exit(1);}
 		process_references(ref_FN, &RefDat, DB_QLEN, 2); // DO_FP is integrated
-		if (DO_ACCEL) {
-			printf("Generating accelerator '%s'\n",xcel_FN);
-			make_accelerator(&RefDat, xcel_FN);
-		}
 		puts("Writing database...");
 		dump_edb(output, &RefDat);
 		puts("Database written.");
+		if (DO_ACCEL) { // NEW [mem]
+			printf("Generating accelerator '%s'\n",xcel_FN);
+			free(RefDat.FingerprintsR.initP); free(RefDat.FingerprintsR.N);
+			free(RefDat.Centroids); free(RefDat.RefClump); free(RefDat.ProfClump);
+			make_accelerator(&RefDat, xcel_FN);
+		}
 		exit(0);
 	}
 	else { // alignment
