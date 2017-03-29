@@ -23,7 +23,7 @@ EMBALMER does not currently implement the following, although all these are plan
 - custom scoring matrices (although it supports any alphabet, including proteins, with option -x)
 - local alignment (only end-to-end alignment is supported like in bowtie2/bwa/usearch default operation)
 - finding very low identity matches with longer query sequences (it stops counting after accruing ~250 mismatches)
-- reverse complementing or paired-end/unstitched alignments (although both can be performed downstream by reverse complementing the reads and/or aligning both pairs in ALLPATHS mode and finding the reference mapped to by both pairs). 
+- Paired-end unstitched alignments (although this can be performed downstream by aligning both pairs in ALLPATHS mode and finding the reference mapped to by both pairs an acceptable distance apart). 
 
 ## What now
 - Further speed improvements are in the works. Each speed improvement is guaranteed (mathematically) never to sacrifice alignment quality, even of a single alignment. 
