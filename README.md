@@ -23,7 +23,7 @@ EMBALMER does not currently implement the following, although all these are plan
 - custom scoring matrices (although it supports any alphabet, including proteins, with option -x)
 - local alignment (only end-to-end alignment is supported like in bowtie2/bwa/usearch default operation)
 - finding very low identity matches with longer query sequences (it stops counting after accruing ~250 mismatches)
-- Paired-end unstitched alignments (although this can be performed downstream by aligning both pairs in ALLPATHS mode and finding the reference mapped to by both pairs an acceptable distance apart). 
+- Paired-end unstitched alignments (although this can be performed downstream by aligning both pairs in ALLPATHS mode and finding the reference mapped to by both pairs with acceptable orientation/distance). 
 
 ## What now
 - Further speed improvements are in the works. Each speed improvement is guaranteed (mathematically) never to sacrifice alignment quality, even of a single alignment. 
@@ -80,7 +80,7 @@ Note: Please be sure to use -n in most cases to penalize matching to Ns and ambi
 `embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m FORAGE -i .98`
 
 ## Where
-Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's interpolated taxonomy is reported in column 13. 
+Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's (interpolated if CAPITALIST) taxonomy is reported in column 13. 
 
 To find the latest version of EMBALMER, see [How](#how) above.
 
@@ -102,7 +102,7 @@ This is likely a bug with embalmer! Please contact me with no less than the foll
   - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce the DB. 
 
 4. *I get no alignments with my amplicon reads, even though I know they're legit:*
-Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing platform adaptors and cleaning up the read with [a QC pipeline](https://github.com/knights-lab/shi7en), as well as reverse complementing if that still fails. 
+Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing platform adaptors and cleaning up and trimming the reads with [a QC pipeline](https://github.com/knights-lab/shi7). 
 
 5. *Other program(s) give me more alignments; how can you say this is optimal?:*
 First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
