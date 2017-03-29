@@ -8,7 +8,7 @@ As next-generation DNA sequencing data emerges faster than computational power c
 
 ## What
 EMBALMER is a truly, mathematically optimal high-throughput end-to-end short-read DNA aligner. It supports:
-- gapped, end-to-end alignment of short-reads (up to a few thousand bases) against arbitrary reference sequences
+- gapped, end-to-end alignment of variable-length short-reads (up to a few thousand bases) against arbitrary reference sequences
 - guaranteed (first) best hit, guaranteed *all* tied hits, or guaranteed *all hits over specified identity cutoff*
 - dual objective scoring function: 1) find lowest edit distance, 2) find highest BLAST ID among all possible least-cost paths
 - optional optimal LCA taxonomy assignment (or other hierarchical variable if supplied) with customizable confidence cutoff
@@ -102,7 +102,7 @@ This is likely a bug with embalmer! Please contact me with no less than the foll
   - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce the DB. 
 
 4. *I get no alignments with my amplicon reads, even though I know they're legit:*
-Try reverse complementing. If that doesn't work, try removing sequencing platform adaptors and cleaning up the read with [a QC pipeline](https://github.com/knights-lab/shi7en), as well as reverse complementing if that still fails. 
+Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing platform adaptors and cleaning up the read with [a QC pipeline](https://github.com/knights-lab/shi7en), as well as reverse complementing if that still fails. 
 
 5. *Other program(s) give me more alignments; how can you say this is optimal?:*
-First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. Further, embalmer does not perform dual-strand (+/-) alignment, as no reverse-complementing is performed. This is also by design for amplicon studies which must be restricted to a single (correct) read orientation. 
+First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
