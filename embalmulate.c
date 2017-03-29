@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-
+// Version 0.2
 typedef struct T T;
 struct T { char *s; uint64_t i; T *left, *right; };
 static inline T* T_add(T *t, char *s, uint64_t l, uint64_t *i) {
@@ -101,10 +101,11 @@ static inline void writeNodes(T *t, char **f) {
 }
 
 void main(int argc, char *argv[]) {
-	if (argc < 3) {puts("Usage: embalmulate in.b6 out.tsv [outTax.tsv]"); exit(1);}
+	if (argc < 3) {puts("Usage: embalmulate in.b6 out.tsv [outTax.tsv] ['GGtrim']"); exit(1);}
 	FILE *in = fopen(argv[1],"rb"), *out = fopen(argv[2],"wb");
 	FILE *tax = argc > 3 ? fopen(argv[3],"wb") : 0;
 	if (!in || !out || (argc > 3 && !tax)) {puts("Can't open file(s)"); exit(1);}
+	int ggtrim = 0; if (argc >= 4 && !strcmp(argv[argc-1],"GGtrim")) --argc, ggtrim = 1;
 	uint64_t i = 0, ns = 0, nt = 0, nr = 0, ix;
 	T *SampT = calloc(1,sizeof(*SampT)), *node = 0;
 	XT *RefT = calloc(1,sizeof(*RefT)), *TaxT = calloc(1,sizeof(*TaxT));
@@ -130,7 +131,14 @@ void main(int argc, char *argv[]) {
 		if (tax) {
 			end = strchr(end+1,'\0'), *--end = 0;
 			for (start = end-1; *start && *start != '\t'; --start);
-			nt += XT_add(TaxT,++start,end-start,ix);
+			char *taxon = ++start; // search taxon for danglies; either expand or contract them.
+			if (GGtrim && end > start) {
+				while (*(end-1) == '_') {
+					do --end; while (end > start && *end != ';');
+					*end = 0;
+				}
+			}
+			nt += XT_add(TaxT,taxon,end-taxon,ix);
 		}
 		++i;
 	}
