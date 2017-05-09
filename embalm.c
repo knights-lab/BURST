@@ -81,7 +81,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define VECSZ 16
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	puts("\nEMBALMER aligner (IMB_All-mer v0.99.3b) by Gabe."); \
+	puts("\nEMBALMER aligner (IMB_All-mer v0.99.3c) by Gabe."); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	puts("\nRequired parameters:");\
 	puts("--references (-r) <name>: FASTA file of reference sequences to search");\
@@ -367,14 +367,14 @@ char * (*taxa_lookup)(char *, uint32_t, TaxPair_t *) = taxa_lookup_generic;
 
 size_t parse_taxonomy(char *filename, TaxPair_t **Obj) {
 	static const size_t linelen = 10000000; //1k entries, 10 meg line lines
-	size_t cur_sz = 1000, ns = -1;
+	size_t cur_sz = 1000, ns = 0;
 	FILE *file = fopen(filename,"rb");
 	if (!file) 
 		{fprintf(stderr,"Cannot open TAXONOMY file: %s.\n",filename); exit(2);}
 	TaxPair_t *T = malloc(cur_sz * sizeof(*T));
 	char *line = calloc(linelen,1), *lineO = line; 
 	while (line = fgets(line, linelen, file)) {
-		if (++ns == cur_sz - 1) { // double all data structures
+		if (ns == cur_sz) { // double all data structures
 			T = realloc(T, (cur_sz*=2)*sizeof(*T));
 			if (!T) {fputs("OOM:T:parse_taxonomy\n",stderr); exit(3);}
 		}
@@ -390,9 +390,11 @@ size_t parse_taxonomy(char *filename, TaxPair_t **Obj) {
 		if (!temp) {fputs("OOM:temp:parse_taxonomy\n",stderr); exit(3);}
 		memcpy(temp,line + i, j-i), temp[j-i] = 0;
 		T[ns].Tax = temp;
+		//printf("[%u] Head = %s\nTax=%s\n",ns,T[ns].Head,T[ns].Tax);
+		++ns;
 	}
 	free(lineO);
-	*Obj = realloc(T, ++ns*sizeof(*T)); // shrink T
+	*Obj = realloc(T, ns*sizeof(*T)); // shrink T
 	fclose(file);
 	return ns;
 }
@@ -449,60 +451,7 @@ size_t parse_tl_fasta(char * filename, char ***HeadersP, char ***SeqsP, uint32_t
 	if (ns >= UINT32_MAX) puts("WARNING: >4 billion sequences processed.");
 	return ns;
 }
-// hasty, less robust parser; may be useful for parsing queries
-size_t parse_tlY_fasta(char * filename, char ***HeadersP, char ***SeqsP, uint32_t **LengthsP) {
-	static const size_t linelen = INT32_MAX; //1k entries, 2-gig lines
-	FILE *file = fopen(filename,"rb");
-	if (!file) { 
-		fprintf(stderr,"Cannot open FASTA file: %s.\n",filename); exit(2); }
-	size_t cur_sz = 10000, ns = 0;
-	char **Headers = malloc(cur_sz * sizeof(*Headers)),
-		 **Seqs = malloc(cur_sz * sizeof(*Seqs));
-	uint32_t *Lengths = malloc(cur_sz * sizeof(*Lengths));
-	char *line = malloc(linelen), *lineO = line; 
-	if (!Headers || !Seqs || !Lengths || !line) {
-		fputs("OOM:parse_tl_fasta\n",stderr); exit(3); }
-	while (line = fgets(line, linelen, file)) {
-		char *end = strchr(line,'\n');
-		if (!end) {puts("End of FASTA reached"); break;}
-		*end = 0;
-		if (ns == cur_sz) {
-			cur_sz += cur_sz;
-			Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-			Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-			Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-			if (!Headers || !Seqs || !Lengths) {
-				fputs("OOM:parse_tl_fasta\n",stderr); exit(3); }
-		}
-		Headers[ns] = memcpy(malloc(end-line),line+1,end-line);
-		line = fgets(line, linelen, file);
-		if (!line || !(end = strchr(line,'\n'))) {
-			puts("WARNING: Premature end of FASTA reached"); break;}
-		*end = 0;
-		Seqs[ns] = memcpy(calloc(end-line+15,1),line,end-line+1);
-		Lengths[ns] = end-line;
-		++ns;
-	}
-	free(lineO);
-	Headers = realloc(Headers,ns*sizeof(*Headers)), Seqs = realloc(Seqs,ns*sizeof(*Seqs));
-	Lengths = realloc(Lengths,ns*sizeof(*Lengths));
-	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
-	if (ns >= UINT32_MAX) puts("WARNING: >4 billion sequences processed.");
-	return ns;
-}
 
-static inline char * findNL(char *a) {
-	__m128i nil = _mm_set1_epi8(0), nl = _mm_set1_epi8('\n');
-	while (1) {
-		__m128i v = _mm_lddqu_si128((void*)a);
-		__m128i n = _mm_cmpeq_epi8(v,nil);
-		__m128i e = _mm_cmpeq_epi8(v,nl);
-		if (_mm_movemask_epi8(n)) return 0;
-		uint16_t x = _mm_movemask_epi8(e);
-		if (x) return a + __builtin_ctz(x);
-		a += 16;
-	}
-}
 static inline char * findNL_abs(char *a) {
 	__m128i nl = _mm_set1_epi8('\n');
 	while (1) {
@@ -525,81 +474,6 @@ static inline char * findNL_or_eol(char *a) {
 		if (z) return a + __builtin_ctz(z);
 		a += 16;
 	}
-}
-
-// hastier, even less robust parser; may still be useful for parsing queries
-size_t parse_tlX_fasta(char * filename, char ***HeadersP, char ***SeqsP, uint32_t **LengthsP) {
-	static const size_t linelen = 1<<24; 
-	FILE *file = fopen(filename,"rb");
-	if (!file) { 
-		fprintf(stderr,"Cannot open FASTA file: %s.\n",filename); exit(2); }
-	
-
-	size_t cur_sz = 10000, ns = 0;
-	char **Headers = malloc(cur_sz * sizeof(*Headers)),
-		 **Seqs = malloc(cur_sz * sizeof(*Seqs));
-	uint32_t *Lengths = malloc(cur_sz * sizeof(*Lengths));
-	char *buf1 = calloc(linelen+16,1); 
-	if (!Headers || !Seqs || !Lengths || !buf1) {
-		fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-	int last = 0; // denotes this is the last buffer in the file
-	size_t numRead = fread(buf1,1,linelen,file);
-	if (numRead < linelen) last = 1;
-	char *begin, *end = buf1 - 1;
-	while (1) {
-		begin = end + 1, end = findNL(begin); //strchr(begin,'\n');
-		if (!end) {
-			if (!last) {
-				uint64_t rem = linelen + buf1 - begin;
-				buf1 = memmove(buf1, begin, rem);
-				numRead = fread(buf1+rem, 1, linelen - rem, file);
-				if (numRead < linelen - rem) last = 1;
-				begin = buf1, end = findNL(begin); //strchr(begin, '\n');
-			}
-			if (!end) {printf("End of FASTA reached [H %u]\n",ns); break;} 
-		} 
-		*end = 0;
-		if (ns == cur_sz) {
-			cur_sz += cur_sz;
-			Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-			Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-			Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-			if (!Headers || !Seqs || !Lengths) {
-				fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-		}
-		Headers[ns] = memcpy(malloc(end-begin),begin+1,end-begin);
-		//printf(">%s\n",Headers[ns]);
-
-		begin = end + 1, end = findNL(begin); //strchr(begin,'\n');
-		if (!end) {
-			if (!last) {
-				uint64_t rem = linelen + buf1 - begin;
-				buf1 = memmove(buf1, begin, rem);
-				numRead = fread(buf1+rem, 1, linelen - rem, file);
-				if (numRead < linelen - rem) last = 1;
-				begin = buf1, end = findNL(begin); //strchr(begin, '\n');
-			}
-			if (!end) {
-				printf("End of FASTA reached [SE %u]\n",ns); 
-				end = strchr(begin,0);
-				Seqs[ns] = memcpy(calloc(end-begin+15,1),begin,end-begin+1);
-				//puts(Seqs[ns]);
-				Lengths[ns++] = end-begin;
-				break;
-			}
-		}
-		*end = 0;
-		Seqs[ns] = memcpy(calloc(end-begin+15,1),begin,end-begin+1);
-		//printf("%s\n",Seqs[ns]);
-		Lengths[ns] = end-begin;
-		++ns;
-	}
-	free(buf1);
-	Headers = realloc(Headers,ns*sizeof(*Headers)), Seqs = realloc(Seqs,ns*sizeof(*Seqs));
-	Lengths = realloc(Lengths,ns*sizeof(*Lengths));
-	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
-	if (ns >= UINT32_MAX) puts("WARNING: >4 billion sequences processed.");
-	return ns;
 }
 
 // fastest cached fasta file parser in the upper midwest
@@ -630,11 +504,10 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 		fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }\
 	wt = omp_get_wtime();
 	Headers[0] = dump+1;
-	char *nl = findNL_abs(Headers[0]); //,'\n'); 
+	char *nl = findNL_abs(Headers[0]); 
 	*nl = 0;
 	Seqs[0] = nl + 1;
-	nl = findNL_or_eol(Seqs[0]); //,'\n');
-	//if (!nl) nl = strchr(Seqs[0],0);
+	nl = findNL_or_eol(Seqs[0]); 
 	*nl = 0;
 	Lengths[0] = nl - Seqs[0];
 	uint64_t ix = 1;
@@ -645,12 +518,11 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 		tix = ix++;
 		char *s = dump + i + 1;
 		Headers[tix] = s;
-		char *nl = findNL_abs(s); //, '\n');
+		char *nl = findNL_abs(s); 
 		*nl = 0;
 		s = nl + 1;
 		Seqs[tix] = s;
-		nl = findNL_or_eol(s); //,'\n');
-		//if (!nl) nl = strchr(s,0);
+		nl = findNL_or_eol(s); 
 		*nl = 0;
 		Lengths[tix] = nl - s;
 	}
@@ -658,190 +530,6 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
 	return ix;
 }
-
-// MT version of the hasty original
-size_t parse_tl_fastaMT(char * filename, char ***HeadersP, char ***SeqsP, uint32_t **LengthsP) {
-	static const size_t linelen = INT32_MAX; 
-	FILE *file = fopen(filename,"rb");
-	if (!file) { 
-		fprintf(stderr,"Cannot open FASTA file: %s.\n",filename); exit(2); }
-	size_t cur_sz = 10000, ns = 0;
-	char **Headers = malloc(cur_sz * sizeof(*Headers)),
-		 **Seqs = malloc(cur_sz * sizeof(*Seqs));
-	uint32_t *Lengths = malloc(cur_sz * sizeof(*Lengths));
-	if (!Headers || !Seqs || !Lengths) {
-		fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-	int num_th = MIN(THREADS,2);
-	char *buffer = malloc(linelen+16), *lastStop = 0; 
-	memset(buffer+linelen-1,0,16);
-	uint32_t leftover = 0, moreLeft = 1, toGetThru, tTot = 0;
-	#pragma omp parallel num_threads(num_th)
-	{
-		uint32_t tsz = 10000, tix = 0, tid = omp_get_thread_num();
-		uint32_t *LenT = malloc(tsz*sizeof(*LenT));
-		char **HeadT = malloc(tsz*sizeof(*HeadT)), **SeqT = malloc(tsz*sizeof(*SeqT));
-		
-		while (moreLeft) {
-			tix = 0; // reset thread-local compartment index; keep old size intact
-			//puts("Beginning moreLeft loop");
-			#pragma omp barrier
-			#pragma omp master
-			{
-				puts("Getting a new chunk.");
-				if (leftover) memmove(buffer,lastStop,leftover);
-				size_t numRead = fread(buffer+leftover,1,linelen-leftover,file);
-				toGetThru = numRead + leftover;
-				if (numRead < linelen-leftover) moreLeft = 0, leftover = 0;
-				else {
-					lastStop = buffer + linelen;
-					while (lastStop > buffer) if (*--lastStop=='>') break;  
-					leftover = buffer + linelen - lastStop;
-				}
-				printf("Numread: %u\n",numRead);
-			}
-		#pragma omp barrier
-		//#pragma omp parallel num_threads(num_th)
-		//{
-			//uint32_t tid = omp_get_thread_num();
-			uint32_t radius = toGetThru / num_th; //, ix;
-			if (radius < (1 << 24)) radius = MIN((1 << 24), toGetThru);
-
-			size_t stIx = tid * radius;
-			if (stIx <= toGetThru) {
-				if (stIx + radius > toGetThru) radius = MIN(toGetThru, 2*radius);
-
-				//stIx += ns; radius += stIx; // so it becomes start to end
-				//radius += stIx; // start to end of buffer
-				char *st = buffer + stIx, *bounds = MIN(lastStop,st + radius);
-				while (st < bounds) {
-					st = strchr(st,'>');
-					if (!st) {printf("Bollocks. %u\n",ns); exit(11);}
-					//uint32_t hasNL = 1;
-					char *ed = strchr(st,'\n');
-					if (!ed) ed = strchr(st,0); //, hasNL = 0;
-					if (!ed) {printf("OAW ballocks.\n"); continue;}
-					
-					
-					
-					char *head = memcpy(malloc(ed-st),st+1,ed-st-1);
-					head[ed-st-1] = 0;
-					//Headers[ix][ed-st-1] = 0;
-					st = ed + 1;
-					ed = strchr(st,'\n'); //findNL_al(line2);
-					if (!ed) {
-						//hasNL = 0;
-						puts("End of FASTA reached (sans newline)");
-						ed = strchr(st,0);
-						if (ed >= bounds) {printf("I go HARD.\n"); continue;}
-						printf("Bounds, ed now: %llu,%llu\n",bounds,ed);
-						if (!ed) {puts("ERROR1"); exit(10);}
-					} //else hasNL = 1;
-					//memset(end,0,16);
-					//printf("%s\n\n",line2);
-					uint32_t sa = ed - st + 1; // + hasNL;
-					sa += 15 & (16 - (sa & 15));
-					// char *dest = malloc(sa);
-					// for (uint32_t i = 0; i < sa; i+=16) 
-					// 	_mm_store_si128((void*)dest+i,_mm_load_si128((void*)line2+i));
-					// Seqs[ix] = dest;
-					if (tix >= tsz) {
-						//printf("Tid %u Current size: %u, ns: %u\n",tid, tsz, tix);
-						tsz += tsz;
-						HeadT = realloc(HeadT, tsz*sizeof(*HeadT));
-						SeqT = realloc(SeqT, tsz*sizeof(*SeqT));
-						LenT = realloc(LenT, tsz*sizeof(*LenT));
-						if (!HeadT || !SeqT || !LenT) {
-							fputs("OOM:parse_MT_fasta\n",stderr); exit(3); }
-					}
-					HeadT[tix] = head;
-					SeqT[tix] = memcpy(malloc(sa),st,ed - st); //realloc(line2,end-line2);
-					memset(SeqT[tix]+(ed-st),0,sa-(ed-st));
-					LenT[tix] = ed-st;
-					/* 
-					#pragma omp critical
-					if (ns + num_th + num_th >= cur_sz) {
-						printf("Current size: %u, ns: %u\n", cur_sz, ns);
-						cur_sz += cur_sz;
-						Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-						Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-						Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-						if (!Headers || !Seqs || !Lengths) {
-							fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-					}
-					if (ed-st) {  
-						#pragma omp atomic capture
-						ix = ns++;
-						Headers[ix] = head;
-						Seqs[ix] = memcpy(malloc(sa),st,ed - st); //realloc(line2,end-line2);
-						memset(Seqs[ix]+(ed-st),0,sa-(ed-st));
-						Lengths[ix] = ed-st;
-					} else printf("If I don't go all the way, it'll be a complete waste of time\nAnd EnerGAAAAY\nand Money\nand MONEY\nmoney\nmoney\nmoney\n");
-					 */
-					st = ed + 1;
-					++tix;
-				}
-				printf("Thread %u committed %u entries.\n",tid,tix);
-				
-				// commit to global structures
-				//#pragma omp barrier
-				#pragma omp atomic
-				tTot += tix;
-				#pragma omp barrier
-				#pragma omp master
-				{
-					printf("GLOBAL new size: %u\n", tTot);
-					//cur_sz += cur_sz;
-					Headers = realloc(Headers, tTot*sizeof(*Headers));
-					Seqs = realloc(Seqs, tTot*sizeof(*Seqs));
-					Lengths = realloc(Lengths, tTot*sizeof(*Lengths));
-					if (!Headers || !Seqs || !Lengths) {
-						fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-				}
-				/* if (tTot >= cur_sz) {
-					printf("GLOBAL resizing from %u [current combined num %u]\n",cur_sz,tTot);
-					cur_sz = tTot + tTot;
-					Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-					Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-					Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-					if (!Headers || !Seqs || !Lengths) {
-						fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-				} */
-				#pragma omp barrier
-				//#pragma omp critical
-				for (uint32_t i = 0; i < tix; ++i) {
-					uint32_t ix;
-					#pragma omp atomic capture
-					ix = ns++;
-					//printf("[%u] Writing entry %u of %u into %u...\n",tid,i,tix,ix);
-					/* if (ns == cur_sz) {
-						printf("GLOBAL Current size: %u, ns: %u\n", cur_sz, ns);
-						cur_sz += cur_sz;
-						Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-						Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-						Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-						if (!Headers || !Seqs || !Lengths) {
-							fputs("OOM:parse_tlX_fasta\n",stderr); exit(3); }
-					} */
-					Headers[ix] = HeadT[i];
-					Seqs[ix] = SeqT[i];
-					Lengths[ix] = LenT[i];
-				}
-			}
-			printf("I'm thread %u. More to go? %u\n",tid,moreLeft);
-		}
-		
-		free(LenT), free(HeadT), free(SeqT);
-		puts("Freed variables; ending parallel section");
-	}
-	
-	Headers = realloc(Headers,ns*sizeof(*Headers)), Seqs = realloc(Seqs,ns*sizeof(*Seqs));
-	Lengths = realloc(Lengths,ns*sizeof(*Lengths));
-	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
-	if (ns >= UINT32_MAX) puts("WARNING: >4 billion sequences processed.");
-	return ns;
-}
-
-
 
 // universal non-vectorized aligner; needs nothing but ref, q, and lengths
 inline float alignNVU(char *ref, char *query, unsigned rlen, unsigned qlen) {
@@ -940,24 +628,6 @@ inline float alignNVU(char *ref, char *query, unsigned rlen, unsigned qlen) {
 	free(scores); free(shifts); free(traces);
 	return c; // or return score;
 }
-
-// Must set HiBound[1]=1 at init and LoBound[1]=rwidth in loop
-			/* if (Xalpha) score = _mm_add_epi8(_mm_cmpeq_epi8(_mm_set1_epi8(qLet), 
-				rChunk),_mm_set1_epi8(1));
-			else
-			#ifdef __SSSE3__
-				score = _mm_shuffle_epi8(SCOREFAST[qLet], rChunk); 
-			#else
-				score = _mm_load_si128((void*)(profile + (x-1)*SCD + qLet));
-			#endif 
-			if (Xalpha) diagSc = _mm_add_epi8(_mm_cmpeq_epi8(_mm_set1_epi8(qLet), 
-				rChunk),_mm_set1_epi8(1));
-			else
-			#ifdef __SSSE3__
-				diagSc = _mm_shuffle_epi8(SCOREFAST[qLet], rChunk); 
-			#else
-				diagSc = _mm_load_si128((void*)(profile + (x-1)*SCD + qLet));
-			#endif*/
 
 #define DIAGSC_XALPHA _mm_add_epi8(_mm_cmpeq_epi8(_mm_set1_epi8(qLet), \
 	rChunk),_mm_set1_epi8(1))
@@ -2954,109 +2624,138 @@ static void (*postScour)(uint16_t *, void **, Split *,
  uint32_t , uint32_t *, uint32_t *) = postScour20;
 	
 void addAmbigScour(Accelerant *F, uint32_t r, char *S, uint32_t w, uint8_t ix) {
-	//printf("Call: r = %u, w = %u, ix = %u\n", r, w, ix);
 	if (ix == SCOUR_N) {
 		if (F[w].len == F[w].cap) // check on success of realloc here?
-			F[w].Refs = realloc(F[w].Refs,(F[w].cap+=F[w].cap+1)*sizeof(*F[w].Refs));
+			F[w].Refs = realloc(F[w].Refs,(F[w].cap+=(F[w].cap>>3)+1)*sizeof(*F[w].Refs));
 		if (!F[w].len || F[w].Refs[F[w].len-1] != r) F[w].Refs[F[w].len++] = r;
 	}
 	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
 		addAmbigScour(F, r, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
 }
+/*void addAmbigScourZ(Split **A, Split **F, uint64_t *i, uint64_t *max, uint32_t r, char *S, uint32_t w, uint8_t ix) {
+	if (ix == SCOUR_N) {
+		if (*i == *max) *F = realloc(*F,(*max*=1.2)*sizeof(**F));
+			//F[w].Refs = realloc(F[w].Refs,(F[w].cap+=F[w].cap+1)*sizeof(*F[w].Refs));
+		if (!A[w]) A[w] = F[(*i)++], *A[w] = (Split){r,0}; //(!F[w].len || F[w].Refs[F[w].len-1] != r) F[w].Refs[F[w].len++] = r;
+		else if (A[w]->v != r) {
+			Split *t = F[(*i)++];
+			*t = (Split){r,A[w]-*F}
+		}
+	}
+	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
+		addAmbigScourZ(F, r, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
+}*/
 void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	FILE *out = fopen(xcel_FN,"wb");
 	if (!out) {fprintf(stderr, "Cannot write accelerator '%s'\n",xcel_FN); exit(1);}
 	char **RefSeq = Rd->RefSeq;
 	uint32_t *RefIxSrt = Rd->RefIxSrt, *RefLen = Rd->RefLen, totR = Rd->totR,
 		totRC = Rd->numRclumps;
-
-	//AccelNode **Forest = calloc(1 << (2*SCOUR_N), sizeof(*Forest));
-	Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
-	uint32_t szBL = 1000, badIX = 0, *BadList = malloc(szBL*sizeof(*BadList));
-	if (!F || !BadList) {fputs("OOM:BadList\n",stderr); exit(3);}
-	double wtime = omp_get_wtime();
 	if (Z) fprintf(stderr,"WARNING: N-penalized accelerator not usable for unpenalized alignment\n");
-	
-	for (uint32_t i = 0; i < totRC; ++i) {
-		printf("Generating accelerator [%u / %u]\r",i,totRC);
+	THREADS = THREADS >> 3 ?: 1; //1; //THREADS > 4 ? 4 : THREADS;
+	Accelerant **G = malloc(THREADS*sizeof(*G));
+	uint32_t **B = malloc(THREADS*sizeof(*B)); 
+	uint64_t *B_I = malloc(THREADS*sizeof(*B_I));
+	double wtime = omp_get_wtime();
+	uint32_t done = 0;
+	#pragma omp parallel num_threads(THREADS)
+	{
+		int tid = omp_get_thread_num();
+		Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
+		uint64_t badSz = 1000, bad_ix = 0;
+		uint32_t *Bad = malloc(badSz*sizeof(*Bad));
 		
-		uint32_t begin = i*VECSZ, end = MIN(totR,begin + VECSZ); 
-		uint16_t doAmbig = 0;
+		#pragma omp for schedule(static,1)
+		for (uint32_t i = 0; i < totRC; ++i) {
+			printf("\rGenerating accelerator [%u / %u]\r",done,totRC);
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ); 
+			uint16_t doAmbig = 0;
 
-		for (uint32_t z = begin; z < end; ++z) { // specific sequence
-			char *s = RefSeq[RefIxSrt[z]]; 
-			uint32_t len = RefLen[RefIxSrt[z]], rowN = 0;
-			if (len < SCOUR_N) continue;
-			
-			// Perfect candidate for vectorization?
-			for (uint32_t j = 0; j < len; ++j) if (s[j] > 4 + Z) {
-				if (s[j]==5) {
-					if (++rowN > SCOUR_L) {
-						if (badIX == szBL) {
-							BadList = realloc(BadList, (szBL*=2)*sizeof(*BadList));
-							if (!BadList) {fputs("OOM:BadList2\n",stderr); exit(3);}
+			for (uint32_t z = begin; z < end; ++z) { // specific sequence
+				char *s = RefSeq[RefIxSrt[z]]; 
+				uint32_t len = RefLen[RefIxSrt[z]], rowN = 0;
+				if (len < SCOUR_N) continue;
+				for (uint32_t j = 0; j < len; ++j) if (s[j] > 4 + Z) {
+					if (s[j]==5) { // detect N's
+						if (++rowN > SCOUR_L) {
+							if (bad_ix >= badSz) {
+								Bad = realloc(Bad, (badSz*=1.2)*sizeof(*Bad));
+								if (!Bad) {fputs("OOM:Bad[acc]2\n",stderr); exit(3);}
+							}
+							Bad[bad_ix++] = i;
+							goto MULTI_ACC_END;
 						}
-						//if (!badIX || BadList[badIX-1] != i) 
-						BadList[badIX++] = i;
-						goto END_ACCEL_LP;
+					}
+					else rowN = 0;
+					doAmbig |= 1 << (z-begin); // per-sequence control
+				} else rowN = 0;
+			}
+
+			for (uint32_t z = begin; z < end; ++z) { 
+				char *s = RefSeq[RefIxSrt[z]]; 
+				uint32_t len = RefLen[RefIxSrt[z]];
+				if (len < SCOUR_N) continue;
+				if (Z) { // screen for N's first!
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
+						uint32_t k = 0; 
+						for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
+						if (k < SCOUR_N) { j+= k; continue; }
+						addAmbigScour(F, i, s + j, 0, 0);
 					}
 				}
-				else rowN = 0;
-				doAmbig |= 1 << (z-begin); // per-sequence control of ambigging
-			} else rowN = 0;
-		}
-		
-		for (uint32_t z = begin; z < end; ++z) { 
-			char *s = RefSeq[RefIxSrt[z]]; 
-			uint32_t len = RefLen[RefIxSrt[z]];
-			if (len < SCOUR_N) continue;
-			if (Z) { // screen for N's first!
-				for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
-					uint32_t k = 0; 
-					for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
-					if (k < SCOUR_N) { j+= k; continue; }
-					addAmbigScour(F, i, s + j, 0, 0);
+				else if (doAmbig << (16-(z-begin)) >> (z-begin)) 
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j)
+						addAmbigScour(F, i, s + j, 0, 0);
+				else {
+					uint32_t w = 0;
+					for (uint32_t j = 0; j + 1 < SCOUR_N; ++j)
+						w <<= 2, w |= s[j]-1;
+					for (uint32_t j = SCOUR_N - 1; j < len; ++j) {
+						w <<= 2, w |= s[j]-1;
+						uint32_t t = (w << SCOUR_R) >> SCOUR_R;
+						if (F[t].len == F[t].cap) 
+							F[t].Refs = realloc(F[t].Refs,(F[t].cap+=(F[t].cap>>3)+1)*sizeof(*F[t].Refs));
+						if (!F[t].len || F[t].Refs[F[t].len-1] != i) F[t].Refs[F[t].len++] = i;
+					}
 				}
 			}
-			else if (doAmbig << (16-(z-begin)) >> (z-begin)) //addAmbigScourLong (F, i, s, 0, 0, len);
-				for (uint32_t j = 0; j + SCOUR_N <= len; ++j)
-					addAmbigScour(F, i, s + j, 0, 0);
-			else {
-				uint32_t w = 0;
-				for (uint32_t j = 0; j + 1 < SCOUR_N; ++j)
-					w <<= 2, w |= s[j]-1;
-				for (uint32_t j = SCOUR_N - 1; j < len; ++j) {
-					w <<= 2, w |= s[j]-1;
-					uint32_t t = (w << SCOUR_R) >> SCOUR_R;
-					//printf("Word = %u [in %u]\n",t,i);
-					if (F[t].len == F[t].cap) // check on success of realloc here?
-						F[t].Refs = realloc(F[t].Refs,(F[t].cap+=F[t].cap+1)*sizeof(*F[t].Refs));
-					if (!F[t].len || F[t].Refs[F[t].len-1] != i) F[t].Refs[F[t].len++] = i;
-				}
-			}
+
+			MULTI_ACC_END:NULL;
+			#pragma omp atomic
+			++done;
 		}
-		END_ACCEL_LP:NULL;
+		G[tid] = F, B[tid] = Bad, B_I[tid] = bad_ix;
 	}
-	printf("Done calculating accelerator (%f s), %u bad\n",
-		omp_get_wtime()-wtime, badIX);
+
+	printf("Done calculating accelerator (%f s)\n",
+		omp_get_wtime()-wtime);
 	wtime = omp_get_wtime();
-	size_t totalWords = 0;
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-		totalWords += F[i].len;
-	printf("Total accelerants stored: %llu\n",totalWords);
-	//BadList = realloc(BadList,badIX*sizeof(*BadList));
+	size_t totalWords = 0; uint32_t totalBad = 0;
+	#pragma omp parallel for reduction(+:totalWords,totalBad)
+	for (uint32_t z = 0; z < THREADS; ++z) {
+		Accelerant *F = G[z];
+		for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
+			totalWords += F[i].len;
+		totalBad += B_I[z];
+	}
+	printf("Total accelerants stored: %llu (%u bad)\n",totalWords, totalBad);
 	uint8_t vers = (1 << 7) | (Z << 6) | SCOUR_N;
 	fwrite(&vers,sizeof(vers),1,out);
-	fwrite(&badIX, sizeof(badIX), 1, out);
+	fwrite(&totalBad, sizeof(totalBad), 1, out);
+	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) {
+		uint32_t len = 0;
+		//#pragma omp parallel for reduction(+:len) num_threads(THREADS) schedule(static,1)
+		for (uint32_t z = 0; z < THREADS; ++z) len += G[z][i].len;
+		fwrite(&len, sizeof(len), 1, out);
+	}
 	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-		fwrite(&F[i].len, sizeof(F[i].len), 1, out);
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-		fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
-	fwrite(BadList, sizeof(*BadList), badIX, out);
+		for (uint32_t z = 0; z < THREADS; ++z) if (G[z][i].len) 
+			fwrite(G[z][i].Refs, sizeof(*G[z][i].Refs), G[z][i].len, out);
+	for (uint32_t z = 0; z < THREADS; ++z)
+		fwrite(B[z], sizeof(*B[z]), B_I[z], out);
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
-	
 	//for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) free(F[i].Refs);
-	free(F), free(BadList);
+	//free(F), free(Bad);
 }
 
 void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
@@ -4087,7 +3786,7 @@ if (DO_ACCEL) {
 		}
 	}
 	else if (RUNMODE==CAPITALIST) {
-		uint32_t numBins = RefDat.numRefHeads; // only unique headers get separate entries
+		uint32_t numBins = totR; //RefDat.numRefHeads; // only unique headers get separate entries
 		size_t *RefCounts = calloc(numBins,sizeof(*RefCounts)), tot = 0;
 		for (uint32_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = BasePod[i], *best = rp;
@@ -4183,7 +3882,7 @@ if (DO_ACCEL) {
 					
 					// copy result up until lv-1 semicolon into Taxon, set FinalTaxon = Taxon;
 					uint32_t s = 0;
-					--ed, --lv;
+					if (ed) --ed; --lv;
 					for (st = 0; Taxa[ed][st] && (s += Taxa[ed][st] == ';') < lv; ++st) 
 						Taxon[st] = Taxa[ed][st];
 					Taxon[st] = 0;
