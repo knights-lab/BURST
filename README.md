@@ -1,10 +1,8 @@
 # embalmer
-Where other optimal aligners go to die a slow death
-
 EMBALMER is an optimal, high-speed pairwise sequence aligner specialized in aligning many NGS short reads against large reference databases.  
 
 ## Why
-As next-generation DNA sequencing data emerges faster than computational power can keep up, researchers are coming up with more and more approximate ("heuristic" or "guesswork") solutions to the fundamental DNA alignment problem. Paradoxically, the more data we have, the less accurate our alignments become as we sacrifice accuracy to the inherent biases of our approximation techniques. The dream of perfect sensitivity and specificity acheivable under mismatch constraints (sequencing/amplification noise, absence of perfectly-matching reference genes, etc) has long been forfeited in favor of techniques promising ever speedier alignment algorithms with misleading titles like "accurate" or "near optimal," when the reality shows each leap in speed comes with a loss of alignment quality (precision/accuracy/sensitivity/recall). EMBALMER returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever. 
+As next-generation DNA sequencing data emerges faster than computational power can keep up, approximate heuristic solutions to the fundamental DNA alignment/mapping problem are increasingly used. Paradoxically, it seems, the more data we have, the less accurate the alignment algorithms used to analyze it. Algorithms with perfect sensitivity and specificity acheivable under mismatch constraints have been neglected in favor of techniques promising speedier alignment at the cost of absolute alignment quality (under some metrics of precision/accuracy/sensitivity/recall). EMBALMER returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever. 
 
 ## What
 EMBALMER is a truly, mathematically optimal high-throughput end-to-end short-read DNA aligner. It supports:
