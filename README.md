@@ -104,3 +104,8 @@ Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing
 
 5. *Other program(s) give me more alignments; how can you say this is optimal?:*
 First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
+
+## Cite
+Al-Ghalith, Gabriel and Dan Knights. EMBALMER enables optimal exhaustive DNA alignment for big data. DOI 2017:
+[![DOI](https://zenodo.org/badge/80084099.svg)](https://zenodo.org/badge/latestdoi/80084099)
+(please cite using DOI until manuscript is published)
