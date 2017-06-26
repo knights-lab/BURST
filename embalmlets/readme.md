@@ -1,2 +1,2 @@
 ## Huh?
-This subrepo contains a bunch of utilities that go along with embalmer in some way or another. 
+This subrepo contains a bunch of utilities that go along with BURST in some way or another. 
