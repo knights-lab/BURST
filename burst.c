@@ -1,4 +1,4 @@
-/* EMBALMER aligner -- fast optimal aligner by Gabe. 
+/* BURST aligner -- fast optimal aligner by Gabe. 
 Copyright (C) 2015-2017 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
@@ -86,7 +86,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define SCOUR_L 4
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	printf("\nEMBALMER aligner (IMB_All-mer v0.99.3d; DB%d version)\n", SCOUR_N); \
+	printf("\nBURST aligner (v0.99.3d; DB%d version)\n", SCOUR_N); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	puts("\nRequired parameters:");\
 	puts("--references (-r) <name>: FASTA file/edx of reference sequences to search");\
@@ -120,7 +120,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	printf("  [speed]: Optional. Can be 'auto', full', 'fast', 'reorder', 'none'\n"); \
 	printf("--clustradius (-cr) <int>: Performance tweaking parameter [auto]\n"); \
 	puts("\n--help (-h): Shows this help screen with version info"); \
-	puts("\nExample: embalmer -r myRefs.fasta -q myQs.fasta -o outputs.txt -i 0.98");\
+	puts("\nExample: burst -r myRefs.fasta -q myQs.fasta -o outputs.txt -i 0.98");\
 	puts("\nLicensed under the GNU Affero General Public License v3.0");\
 	exit(1);\
 }
