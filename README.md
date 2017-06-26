@@ -1,11 +1,11 @@
-# embalmer
-EMBALMER is an optimal, high-speed pairwise sequence aligner specialized in aligning many NGS short reads against large reference databases.  
+# BURST
+BURST (formerly known as embalmer) is an optimal, high-speed pairwise sequence aligner specialized in aligning many NGS short reads against large reference databases.  
 
 ## Why
-As next-generation DNA sequencing data emerges faster than computational power can keep up, approximate heuristic solutions to the fundamental DNA alignment/mapping problem are increasingly used. Paradoxically, it seems, the more data we have, the less accurate the alignment algorithms used to analyze it. Algorithms with perfect sensitivity and specificity acheivable under mismatch constraints have been neglected in favor of techniques promising speedier alignment at the cost of absolute alignment quality (under some metrics of precision/accuracy/sensitivity/recall). EMBALMER returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever. 
+As next-generation DNA sequencing data emerges faster than computational power can keep up, approximate heuristic solutions to the fundamental DNA alignment/mapping problem are increasingly used. Paradoxically, it seems, the more data we have, the less accurate the alignment algorithms used to analyze it. Algorithms with perfect sensitivity and specificity acheivable under mismatch constraints have been neglected in favor of techniques promising speedier alignment at the cost of absolute alignment quality (under some metrics of precision/accuracy/sensitivity/recall). BURST returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever. 
 
 ## What
-EMBALMER is a truly, mathematically optimal high-throughput end-to-end short-read DNA aligner. It supports:
+BURST is a truly, mathematically optimal high-throughput end-to-end short-read DNA aligner. It supports:
 - gapped, end-to-end alignment of variable-length short-reads (up to a few thousand bases) against arbitrary reference sequences
 - guaranteed (first) best hit, guaranteed *all* tied hits, or guaranteed *all hits over specified identity cutoff*
 - dual objective scoring function: 1) find lowest edit distance, 2) find highest BLAST ID among all possible least-cost paths
@@ -16,7 +16,7 @@ EMBALMER is a truly, mathematically optimal high-throughput end-to-end short-rea
 - fast speed of operation. It can align 12 million 292-bp microbial amplicon sequences against the Greengenes 13.8 97% reference database in under 10 minutes on a quad E7-4850v2 server, or a couple of hours on a dual-core 2013 Macbook Air. It also aligns shotgun reads against very large databases (like the ~20GB IMG annotated bacterial genes database); 0.99.2 can align at a rate of *over 10,000 100bp reads per second* against a 31.5GB subset of RefSeq complete genomes at 98% alignment identity on a single 32-core Ivy Bridge server. 
 
 ## What not
-EMBALMER does not currently implement the following, although all these are planned in future releases:
+BURST does not currently implement the following, although all these are planned in future releases:
 - clustering (as an output mode; it can use clustering in making its database)
 - custom scoring matrices (although it supports any alphabet, including proteins, with option -x)
 - local alignment (only end-to-end alignment is supported like in bowtie2/bwa/usearch default operation)
@@ -27,10 +27,10 @@ EMBALMER does not currently implement the following, although all these are plan
 - Further speed improvements are in the works. Each speed improvement is guaranteed (mathematically) never to sacrifice alignment quality, even of a single alignment. 
 
 ## How
-See [Releases](https://github.com/knights-lab/embalmer/releases) page for precompiled binaries for a variety of systems with no dependencies. Basically, just download one of the files on the releases page appropriate for your system (Windows, Linux, or Mac) and run it on the command line. If on Windows, pick an ".exe" version; if on macOS pick a ".mac" version; if on Linux pick a ".linux" version. If the default version (embalm.exe, embalm.mac, embalm.linux) doesn't work, try the corresponding version with ".older" in the name, and if that still doesn't work, try the one with ".buzzard." Please let me know if you can't get the program to run on your system. 
+See [Releases](https://github.com/knights-lab/burst/releases) page for precompiled binaries for a variety of systems with no dependencies. Basically, just download one of the files on the releases page appropriate for your system (Windows, Linux, or Mac) and run it on the command line. If on Windows, pick an ".exe" version; if on macOS pick a ".mac" version; if on Linux pick a ".linux" version. If the default version (burst.exe, burst.mac, burst.linux) doesn't work, try the corresponding version with ".older" in the name, and if that still doesn't work, try the one with ".buzzard." Please let me know if you can't get the program to run on your system. 
 
 ### Easiest (avoid long reference sequences):
-`embalm -r myRefs.fasta -q myQueries.fasta -o myAlignments.b6`
+`burst -r myRefs.fasta -q myQueries.fasta -o myAlignments.b6`
 
 ### Fastest (step 1: create database, step 2: use database for alignments):
 1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d QUICK 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d QUICK 125" and "-i 0.98" instead.*
@@ -61,7 +61,7 @@ Note: Please be sure to use -n in most cases to penalize matching to Ns and ambi
 
 `embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
 
-- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties! (Cleaned-up universal taxonomy file for any Greengenes level can be found in [Releases](https://github.com/knights-lab/embalmer/releases).)
+- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties! (Cleaned-up universal taxonomy file for any Greengenes level can be found in [Releases](https://github.com/knights-lab/burst/releases).)
 
 `embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST`
 
@@ -80,7 +80,7 @@ Note: Please be sure to use -n in most cases to penalize matching to Ns and ambi
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's (interpolated if CAPITALIST) taxonomy is reported in column 13. 
 
-To find the latest version of EMBALMER, see [How](#how) above.
+To find the latest version of BURST, see [How](#how) above.
 
 ## Who
 Please contact Gabe Al-Ghalith or Dan Knights* (I'm sure you can find our contact info!)
@@ -93,7 +93,7 @@ If on Linux or Mac, you may have to run the command "chmod +x" on the program fi
 Uh oh, looks like your database contains long series of "N"s (ambiguous bases). Because all ambiguities are resolved according to IUPAC standards, N actually matches perfectly to anything. For example, the nucleotide "K" matches "Y" but not "M," although "M" matches "Y". Although this opens up exciting new possibilities for leveraging ambiguity in aligning to SNP-aware databases, psuedo-clusters, and more, a stretch of 300 N's present in some poorly-curated databases will match any length-300 query perfectly. Disable this behavior by passing -n or --npenalize, which will force N's to be treated as mismatches against A, C, G, or T/U in the query. N will still be considered a match to any ambiguous nucleotides in the query. 
 
 3. *I get "segmentation fault" (or other crash):*
-This is likely a bug with embalmer! Please contact me with no less than the following and I'll try to fix it:
+This is likely a bug with BURST! Please contact me with no less than the following and I'll try to fix it:
   - The exact command-line used to run the program
   - The version of emalmer used (run with -h to see help)
   - The operating system and amount of RAM (memory) in the computer running it
@@ -103,9 +103,9 @@ This is likely a bug with embalmer! Please contact me with no less than the foll
 Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing platform adaptors and cleaning up and trimming the reads with [a QC pipeline](https://github.com/knights-lab/shi7). 
 
 5. *Other program(s) give me more alignments; how can you say this is optimal?:*
-First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; EMBALMER is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
+First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; BURST is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
 
 ## Cite
-Al-Ghalith, Gabriel and Dan Knights. EMBALMER enables optimal exhaustive DNA alignment for big data. DOI 2017:
+Al-Ghalith, Gabriel and Dan Knights. BURST enables optimal exhaustive DNA alignment for big data. DOI 2017:
 [![DOI](https://zenodo.org/badge/80084099.svg)](https://zenodo.org/badge/latestdoi/80084099)
 (please cite using DOI until manuscript is published)
