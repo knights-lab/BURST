@@ -86,38 +86,42 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define SCOUR_L 4
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	printf("\nBURST aligner (v0.99.3d; DB%d version)\n", SCOUR_N); \
+	printf("\nBURST aligner (v0.99.3f; DB%d version)\n", SCOUR_N); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
-	puts("\nRequired parameters:");\
-	puts("--references (-r) <name>: FASTA file/edx of reference sequences to search");\
-	puts("--queries (-q) <name>: FASTA file of queries to match against references");\
-	puts("--output (-o) <name>: Text file for writing results (BLAST-like tdf)");\
+	printf("\nBasic parameters:\n");\
+	printf("--references (-r) <name>: FASTA/edx DB of reference sequences [required)]");\
+	printf("--accelerator (-a) <name>: Creates/uses a helper DB (acc/acx) [optional]\n"); \
+	puts("--queries (-q) <name>: FASTA file of queries to search for [required if aligning]");\
+	puts("--output (-o) <name>: Blast6/edb file for output alignments/database [required]");\
 	puts("\nBehavior parameters:"); \
 	puts("--forwardreverse (-fr): also search the reverse complement of queries"); \
-	puts("--whitespace (-w): write full query names in output (incl. whitespace)"); \
-	puts("--npenalize (-n): Make A,C,G,T,U in query not match X,N in reference"); \
+	puts("--whitespace (-w): write full query names in output (include whitespace)"); \
+	puts("--npenalize (-n): Force A,C,G,T,U,N,X in query to mismatch X,N in reference"); \
 	puts("--xalphabet (-x): Allow any alphabet and disable ambiguity matching");\
-	puts("--taxonomy (-b) <name>: assign taxonomy w/file. Interpolate with -m CAPITALIST");\
-	puts("--mode (-m) <name>: Operating mode. [BEST] Pick one of these:");\
-	puts("  BEST (reports first best match by hybrid BLAST id)"); \
+	puts("--taxonomy (-b) <name>: taxonomy map (to interpolate, use -m CAPITALIST)");\
+	puts("--mode (-m) <name>: Pick an alignment reporting mode by name. Available modes:");\
+	puts("  BEST (reports first best match by hybrid BLAST id) [default]"); \
 	puts("  ALLPATHS (reports all ties with same error profile)"); \
 	puts("  CAPITALIST (reports minimal set of references among ties)"); \
 	puts("  FORAGE (reports all matches above specified threshold"); \
+	/*puts("  [not enabled]: PAIRED, MAPPED, INLINE");*/ \
 	puts("--makedb (-d) [name qLen]: Create a database from input references");\
-	printf("  [name]: Optional. QUICK [QUICK]\n");\
+	printf("  [name]: Optional. Can be DNA, RNA, or QUICK [QUICK]\n");\
 	printf("  [qLen]: Optional, reqs [name]. Max query length to search in DB [%d]\n",DB_QLEN); \
-	printf("--accelerator (-a) <name>: Create or use a helper DB\n"); \
 	printf("\nPerformance parameters:\n"); \
-	printf("--taxacut (-bc) <int>: ignore 1/[%u] disagreeing taxonomy calls\n",TAXACUT); \
-	printf("--taxa_ncbi (-bn): Assume NCBI header '>xxx|accsn...' for taxonomy\n"); \
+	printf("--taxacut (-bc) <int>: allow 1/<int> [1/%u] disagreeing taxonomy calls\n",TAXACUT); \
+	printf("--taxa_ncbi (-bn): Assume NCBI header format '>xxx|accsn...' for taxonomy\n"); \
 	printf("--skipambig (-sa): Do not consider highly ambiguous queries (5+ ambigs)\n"); \
-	printf("--taxasuppress (-bs) [STRICT]: Adjust taxonomy calls by %%ID\n"); \
-	printf("--id (-i) <decimal>: similarity (range 0-1) needed to report match [%.2f]\n",THRES);\
-	printf("--threads (-t) <int>: How many processors to use [%u]\n",THREADS);\
-	printf("--shear (-s) [len]: Shear references longer than len bases [%ld]\n",REBASE_AMT);\
-	printf("--fingerprint (-f): Use sketch fingerprinting to precheck matches\n"); \
+	printf("--taxasuppress (-bs) [STRICT]: Surpress taxonomic specificity by %%ID\n"); \
+	printf("--id (-i) <decimal>: target minimum similarity (range 0-1) [%.2f]\n",THRES);\
+	printf("--threads (-t) <int>: How many logical processors to use [%u]\n",THREADS);\
+	printf("--shear (-s) [len]: Shear references longer than [len] bases [%ld]\n",REBASE_AMT);\
+	/*printf("--unique (-u): Dereplicate references (lossless preprocessing)\n");*/ \
+	printf("--fingerprint (-f): Use sketch fingerprinting to precheck matches [or cluster db]\n"); \
 	printf("--prepass (-p) [speed]: use fingerprints to pre-filter matches ["PP_DEF_ST"]\n"); \
 	printf("  [speed]: Optional. Can be 'auto', full', 'fast', 'reorder', 'none'\n"); \
+	/*printf("--cache (-c) <int>: Performance tweaking parameter [%d]\n",cacheSz); */ \
+	/* printf("--latency (-l) <int>: Performance tweaking parameter [%d]\n",LATENCY); */ \
 	printf("--clustradius (-cr) <int>: Performance tweaking parameter [auto]\n"); \
 	puts("\n--help (-h): Shows this help screen with version info"); \
 	puts("\nExample: burst -r myRefs.fasta -q myQs.fasta -o outputs.txt -i 0.98");\
@@ -453,58 +457,69 @@ size_t parse_tl_fasta(char * filename, char ***HeadersP, char ***SeqsP, uint32_t
 	return ns;
 }
 
-size_t parse_tl_fasta_old(char * filename, char ***HeadersP, char ***SeqsP, uint32_t **LengthsP) {
-	static const size_t linelen = INT32_MAX; //1k entries, 2-gig lines
-	FILE *file = fopen(filename,"rb");
-	if (!file) { 
-		fprintf(stderr,"Cannot open FASTA file: %s.\n",filename); exit(2); }
-	size_t cur_sz = 1000, ns = -1, len16;
+size_t parse_tl_fasta_db(char *ref_FN, char ***HeadersP, char **SeqsP, 
+ uint64_t **OffsP, uint64_t *numLet) {
+	size_t linelen = INT32_MAX; //1k entries, 500 meg lines
+	size_t cur_len = linelen, cur_sz = 1000;
+	FILE *file = fopen(ref_FN,"rb");
+	if (!file) 
+		{ fprintf(stderr,"Cannot open FASTA file: %s.\n",ref_FN); exit(2); }
 	char **Headers = malloc(cur_sz * sizeof(*Headers)),
-		 **Seqs = malloc(cur_sz * sizeof(*Seqs));
-	uint32_t *Lengths = malloc(cur_sz * sizeof(*Lengths));
-	char *line = malloc(linelen), *lineO = line; 
-	if (!Headers || !Seqs || !Lengths || !line) {
-		fputs("OOM:parse_tl_fasta\n",stderr); exit(3); }
+		 *Seqs = malloc(cur_len * sizeof(*Seqs));
+	uint64_t *Offsets = malloc(cur_sz * sizeof(*Offsets)), 
+		cur_off = -1, ns = -1;
+	char *line = malloc(linelen); // assume 16-bit aligned on 64-bit
+	if (!line) {fputs("OOM:ptfdLn\n",stderr); exit(3);}
 	int lastHd = 0;
 	while (line = fgets(line, linelen, file)) {
-		size_t len = strlen(line); // Kill newlines
-		if (len && line[len-1] == '\n') --len;
-		if (len && line[len-1] == '\r') --len;
+		size_t len = strlen(line); // kill newlines
+		if (line[len-1] == '\n') --len;
+		if (line[len-1] == '\r') --len;
 		line[len] = 0;
 		switch (*line) {
-			case '>':  // We could be in the (a) header.
+			case '>': // We could be in the (a) header.
 				if (lastHd) break;
 				if (ns++ == cur_sz) { // double all data structures
 					cur_sz += cur_sz;
 					Headers = realloc(Headers, cur_sz*sizeof(*Headers));
-					Seqs = realloc(Seqs, cur_sz*sizeof(*Seqs));
-					Lengths = realloc(Lengths, cur_sz*sizeof(*Lengths));
-					if (!Headers || !Seqs || !Lengths) {
-						fputs("OOM:parse_tl_fasta\n",stderr); exit(3); }
+					Offsets = realloc(Offsets, cur_sz*sizeof(*Offsets));
+					if (!Headers || !Offsets) {
+						fputs("OOM:db_parse",stderr); exit(3); }
 				}
 				lastHd = 1;
 				Headers[ns] = memcpy(malloc(len), line+1, len);
-				Lengths[ns] = 0; 
+				Offsets[ns] = ++cur_off; // insert null post-seq 
 			case '\0': case ' ': break;
 			default: // we're in sequence (hopefully!)
 				lastHd = 0;
-				uint32_t a = Lengths[ns] + len;
-				len16 = a + (15 & (16 - (a & 15)));
-				if (!Lengths[ns]) Seqs[ns] = malloc(len16+1);
-				else Seqs[ns] = memcpy(malloc(len16+1),Seqs[ns],Lengths[ns]); 
-				memcpy(Seqs[ns] + Lengths[ns],line,len);
-				Lengths[ns] += len;
-				memset(Seqs[ns]+Lengths[ns],'\0',len16-Lengths[ns]+1); // trailing nil
+				if (cur_off + len + 1 >= cur_len) { //
+					Seqs = realloc(Seqs, (cur_len*=2)*sizeof(*Seqs));
+					if (!Seqs) {fputs("OOM:db_parse",stderr); exit(3);}
+				} // guaranteed to be enough -- but what about a while loop
+				// now dump the current sequence bits into the trunk
+				//update cur_off
+				memcpy(Seqs + cur_off,line,len+1); //+1 for null
+				cur_off += len;
 		}
 	}
+	// add tail offset at ++cur_off
+	// reallocate data structures with one extra space (tail)
 	if (lastHd) puts("WARNING: file ends on header. Skipping last sequence."), --ns;
 	free(lineO);
-	Headers = realloc(Headers,++ns*sizeof(*Headers)), Seqs = realloc(Seqs,ns*sizeof(*Seqs));
-	Lengths = realloc(Lengths,ns*sizeof(*Lengths));
-	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
-	if (ns >= UINT32_MAX) puts("WARNING: >4 billion sequences processed.");
+	Headers = realloc(Headers, (++ns+1)*sizeof(*Headers));
+	Offsets = realloc(Offsets, (ns+1)*sizeof(*Offsets));
+	Seqs = realloc(Seqs,++cur_off+16); // ensure alignment of tail
+	if (!Headers || !Offsets || !Seqs) {
+		fputs("Error OOM terminus p1",stderr); exit(3); }
+	memset(Seqs+cur_off,'\0',15); 
+	Offsets[ns] = cur_off;
+	Headers[ns] = 0; // just a tailcap
+	
+	// return the proper data now
+	*HeadersP = Headers; *SeqsP = Seqs; *OffsP = Offsets;
+	*numLet = cur_off;
 	return ns;
-}
+} 
 
 static inline char * findNL_abs(char *a) {
 	__m128i nl = _mm_set1_epi8('\n');
@@ -574,10 +589,12 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 		Headers[tix] = s;
 		char *nl = findNL_abs(s); 
 		*nl = 0;
+		if (*(nl-1) == '\r') *(nl-1) = 0;
 		s = nl + 1;
 		Seqs[tix] = s;
 		nl = findNL_or_eol(s); 
 		*nl = 0;
+		if (*(nl - 1) == '\r') *--nl = 0;
 		Lengths[tix] = nl - s;
 	}
 	if (ix > UINT32_MAX) puts("WARNING: greater than 4 billion queries");
@@ -1448,12 +1465,16 @@ static inline void create_sse2_profiles(Reference_Data *Rd) {
 
 // curate is 0 (no dedupe), 1 (dedupe), 2 (make db so skip sse2 profiles)
 static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t maxLenQ, int curate) {
-	Rd->totR = parse_tl_fasta(ref_FN, &Rd->RefHead, &Rd->RefSeq, &Rd->RefLen);
+	// variables for the db code
+	char *SeqDump = 0; uint64_t numLet = 0, *Offs = 0;
+	if (Rd->dbType == QUICK) Rd->totR = parse_tl_fasta(ref_FN, &Rd->RefHead, &Rd->RefSeq, &Rd->RefLen);
+	else Rd->totR = parse_tl_fasta_db(ref_FN, &Rd->RefHead, &SeqDump, &Offs, &numLet);
 	printf("Parsed %u references.\n",Rd->totR);
 
-	// Translate nucleotides into parallel register lookups
-	if (!Xalpha) for (uint32_t i = 0; i < Rd->totR; ++i) 
+	// Translate nucleotides by parallel register lookups
+	if (!Xalpha && Rd->dbType == QUICK) for (uint32_t i = 0; i < Rd->totR; ++i) 
 		translate16aln(Rd->RefSeq[i],Rd->RefLen[i]);
+	else if (!Xalpha && Rd->dbType == DNA_16) translate16aln(SeqDump, numLet);
 
 	// Shear the references to desired length + tail overlap
 	uint32_t origR = Rd->totR, numRrebase = 0, *origRefLen = Rd->RefLen, *ReRefIx;
@@ -1465,19 +1486,27 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		shear = shear < minShear ? minShear : shear; // at least minShear
 		printf("\nInitiating database shearing procedure [shear %u, ov %u].\n",
 			shear, ov);
-		for (uint32_t i = 0; i < origR; ++i) {
-			long unit = (long)Rd->RefLen[i] - (long)ov;
-			unit = unit < 0 ? 1 : unit;
-			numRrebase += unit / shear + (unit % shear != 0);
+		if (Rd->dbType == DNA_16) {
+			puts("Performing compressive database optimization...");
+			puts("NOT YET IMPLEMENTED\n"); exit(1);
+
+			// Final check: defined numRrebase, all RefStart populated; origRefLen+origRefSeq and Rd pointers to them
 		}
-		ReRefIx = malloc(numRrebase*sizeof(*ReRefIx)); 
-		Rd->RefStart = malloc(numRrebase*sizeof(*Rd->RefStart));
-		if (!ReRefIx || !Rd->RefStart) {fputs("OOM:ReRefIx\n",stderr); exit(3);}
-		for (uint32_t i = 0, x = 0; i < origR; ++i) {
-			long unit = (long)Rd->RefLen[i] - (long)ov;
-			unit = unit < 0 ? 1 : unit;
-			for (uint32_t j = 0; j < unit; j+= shear) 
-				ReRefIx[x] = i, Rd->RefStart[x++] = j ? j : 0;
+		else {
+			for (uint32_t i = 0; i < origR; ++i) {
+				long unit = (long)Rd->RefLen[i] - (long)ov;
+				unit = unit < 0 ? 1 : unit;
+				numRrebase += unit / shear + (unit % shear != 0);
+			}
+			ReRefIx = malloc(numRrebase*sizeof(*ReRefIx)); 
+			Rd->RefStart = malloc(numRrebase*sizeof(*Rd->RefStart));
+			if (!ReRefIx || !Rd->RefStart) {fputs("OOM:ReRefIx\n",stderr); exit(3);}
+			for (uint32_t i = 0, x = 0; i < origR; ++i) {
+				long unit = (long)Rd->RefLen[i] - (long)ov;
+				unit = unit < 0 ? 1 : unit;
+				for (uint32_t j = 0; j < unit; j+= shear) 
+					ReRefIx[x] = i, Rd->RefStart[x++] = j ? j : 0;
+			}
 		}
 		
 		printf("Shorn refs: %u, rebased clumps: %u\n",numRrebase, numRrebase/16 + (numRrebase%16 != 0));
@@ -1678,8 +1707,8 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 
 			printf("Time to preprocess: %f\n",omp_get_wtime()-wtime);
 			wtime = omp_get_wtime();
+			// TODO: use just this grouping as "fast clustering"
 		}
-
 
 		Split **CC = calloc((totR-0),sizeof(*CC));
 		if (!CC) {fputs("OOM:FP:CC\n",stderr); exit(3);}
@@ -4127,7 +4156,7 @@ int main( int argc, char *argv[] ) {
 			if (i + 1 != argc && argv[i+1][0] != '-') { // arg provided
 				if (!strcmp(argv[++i],"DNA")) dbType = DNA_16;
 				else if (!strcmp(argv[i],"RNA")) dbType = DNA_16;
-				else if (!strcmp(argv[i],"PROTEIN")) dbType = PROT;
+				/*else if (!strcmp(argv[i],"PROTEIN")) dbType = PROT;*/
 				else if (!strcmp(argv[i],"QUICK")) dbType = QUICK;
 				else {printf("Unsupported makedb mode '%s'\n",argv[i]); exit(1);};
 				dbsel = argv[i];
@@ -4254,11 +4283,13 @@ int main( int argc, char *argv[] ) {
 	setScore(); // Prepare the scoring tables
 
 	// Determine what to do
-	if (makedb && dbType != QUICK) { 
+	/*if (makedb && dbType != QUICK) { 
 		puts("DB mode not implemented in this release. Use QUICK instead.");
 		exit(0);
 	} 
-	else if (makedb) {
+	else */
+	if (makedb) {
+		RefDat.dbType = dbType;
 		puts("");
 		if (!REBASE) DB_QLEN = 0;
 		if (isRefEDB(ref_FN)) {fputs("ERROR: DBs can't make DBs.\n",stderr); exit(1);}
