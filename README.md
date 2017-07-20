@@ -57,7 +57,7 @@ burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx
 1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d QUICK 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d QUICK 125" and "-i 0.98" instead.*
 2. Run `burst -r MyDB.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97` to generate a database. Run again to convert edb file to newer edx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb`, and then again to convert acc file to newer acx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx`; then delete the unneeded acc and edx files: `rm MyDB.acc MyDB.edb`.
 3. (optional, advanced) To refine the database, when clustering and DB generation finishes, note the number of empties on the line "There are _ links (_._) and _ empties (0.XXXX)". If the proportion of empty clusters 0.XXX is higher than 0.33, you might want to raise the clustering radius higher than the chosen default X indicated on the line "Average coverage (atomic) = _._, cluster radius: X". Doubling it would be a good start. Conversely, if you have insufficient memory to cluster, consider reducing the cluster radius or starting with something low like 3.
-4. Use the database for all future alignments: `embalm -r MyDB.edb -q MyQueries.fasta -o myAlignments.b6 -f`
+4. Use the database for all future alignments: `burst -r MyDB.edb -q MyQueries.fasta -o myAlignments.b6 -f`
 
 Other alignment modes, taxonomy parsing, tie-reporting, etc:
 - Using "-m CAPITALIST" enables unique-reference minimization (reducing the number of unique references hit; useful for OTU picking or taxonomy assignment). 
@@ -76,27 +76,27 @@ Note: Please be sure to use -n in most cases to penalize matching to Ns and ambi
 
 - [Build a database](#fastest-step-1-create-database-step-2-use-database-for-alignments) (optional, you can also search against raw fasta but this is faster)
 
-`embalm -r 97_otus.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
+`burst -r 97_otus.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
 
 - Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n`
+`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n`
 
 - Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties! (Cleaned-up universal taxonomy file for any Greengenes level can be found in [Releases](https://github.com/knights-lab/burst/releases).)
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST`
+`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST`
 
 - As in previous but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST --taxacut 5`
+`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST --taxacut 5`
 
 - Get a report of all ties for best match for every query. Get ready for a large output file.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m ALLPATHS`
+`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m ALLPATHS`
 
 - Like previous (ALLPATHS) but now reports all matches above the identity threshold (here 98% for example) for every query.
 
-`embalm -r 97_otus.edb -q seqs.fna -o embalm99g.txt -n --taxonomy taxonomy.txt -m FORAGE -i .98`
+`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m FORAGE -i .98`
 
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's (interpolated if CAPITALIST) taxonomy is reported in column 13. 
@@ -108,7 +108,7 @@ Please contact Gabe Al-Ghalith or Dan Knights* (I'm sure you can find our contac
 
 ## Woah (troubleshooting)
 1. *I downloaded the program for my system but it won't run! Says "Permission denied" or "command not found":*
-If on Linux or Mac, you may have to run the command "chmod +x" on the program first, and then run the program inside of the directory that contains it using a dot and slash before the name (for example, on Linux: "./embalm.linux" if the file "embalm.linux" is within the current working directory of the terminal). Another solution is to add the directory containing the program to the system PATH. This technique may vary by operating system and terminal type. 
+If on Linux or Mac, you may have to run the command "chmod +x" on the program first, and then run the program inside of the directory that contains it using a dot and slash before the name (for example, on Linux: "./burst.linux" if the file "burst.linux" is within the current working directory of the terminal). Another solution is to add the directory containing the program to the system PATH. This technique may vary by operating system and terminal type. 
 
 2. *All queries align with 100% identity, many to the same strange reference sequence:*
 Uh oh, looks like your database contains long series of "N"s (ambiguous bases). Because all ambiguities are resolved according to IUPAC standards, N actually matches perfectly to anything. For example, the nucleotide "K" matches "Y" but not "M," although "M" matches "Y". Although this opens up exciting new possibilities for leveraging ambiguity in aligning to SNP-aware databases, psuedo-clusters, and more, a stretch of 300 N's present in some poorly-curated databases will match any length-300 query perfectly. Disable this behavior by passing -n or --npenalize, which will force N's to be treated as mismatches against A, C, G, or T/U in the query. N will still be considered a match to any ambiguous nucleotides in the query. 
