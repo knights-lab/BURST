@@ -29,12 +29,27 @@ BURST does not currently implement the following, although all these are planned
 ## How
 See [Releases](https://github.com/knights-lab/burst/releases) page for precompiled binaries for a variety of systems with no dependencies. Basically, just download one of the files on the releases page appropriate for your system (Windows, Linux, or Mac) and run it on the command line. If on Windows, pick an ".exe" version; if on macOS pick a ".mac" version; if on Linux pick a ".linux" version. If the default version (burst.exe, burst.mac, burst.linux) doesn't work, try the corresponding version with ".older" in the name, and if that still doesn't work, try the one with ".buzzard." Please let me know if you can't get the program to run on your system. 
 
-### Easiest (avoid long reference sequences):
+### Easiest (Not for long reference sequences such as gigabase-length eukaryotic genomes):
 `burst -r myRefs.fasta -q myQueries.fasta -o myAlignments.b6`
+
+### For long (> 100Mbp) genomes (3 steps to create database first, then search):
+1. Create initial database
+`burst -d -s -a MyDB.acc -f -n -o MyDB.edb -r MyDB.fasta`
+2. Run again to convert edb to smaller edx format
+`burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb`
+3. Run again to convert acc to acx format. Also remove unneeded acc and edb files.
+```
+burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx
+rm RefDB.acc RefDB.edb
+```
+
+4. Search
+`burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx`
+
 
 ### Fastest (step 1: create database, step 2: use database for alignments):
 1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d QUICK 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d QUICK 125" and "-i 0.98" instead.*
-2. Run `embalm -r myRefs.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97` to generate a database.
+2. Run `burst -r MyDB.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97` to generate a database. Run again to convert edb file to newer edx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb`, and then again to convert acc file to newer acx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx`; then delete the unneeded acc and edx files: `rm MyDB.acc MyDB.edb`.
 3. (optional, advanced) To refine the database, when clustering and DB generation finishes, note the number of empties on the line "There are _ links (_._) and _ empties (0.XXXX)". If the proportion of empty clusters 0.XXX is higher than 0.33, you might want to raise the clustering radius higher than the chosen default X indicated on the line "Average coverage (atomic) = _._, cluster radius: X". Doubling it would be a good start. Conversely, if you have insufficient memory to cluster, consider reducing the cluster radius or starting with something low like 3.
 4. Use the database for all future alignments: `embalm -r MyDB.edb -q MyQueries.fasta -o myAlignments.b6 -f`
 
