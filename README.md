@@ -34,9 +34,13 @@ See [Releases](https://github.com/knights-lab/burst/releases) page for precompil
 
 ### For long (> 100Mbp) genomes (3 steps to create database first, then search):
 1. Create initial database
-`burst -d -s -a MyDB.acc -f -n -o MyDB.edb -r MyDB.fasta`
+```
+burst -d -s -a MyDB.acc -f -n -o MyDB.edb -r MyDB.fasta
+```
 2. Run again to convert edb to smaller edx format
-`burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb`
+```
+burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb
+```
 3. Run again to convert acc to acx format. Also remove unneeded acc and edb files.
 ```
 burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx
@@ -44,7 +48,9 @@ rm RefDB.acc RefDB.edb
 ```
 
 4. Search
-`burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx`
+```
+burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx
+```
 
 
 ### Fastest (step 1: create database, step 2: use database for alignments):
