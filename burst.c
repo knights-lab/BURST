@@ -64,7 +64,7 @@ typedef enum {
 } Mode;
 typedef enum {DNA_16, DNA_8, DNA_4, PROT, DATA, QUICK} DBType;
 typedef enum {NONE = 0, REORDER = 1, FAST = 2, FULL = 3, AUTO = 4} Prepass_t;
-Mode RUNMODE = BEST;
+Mode RUNMODE = CAPITALIST;
 Prepass_t DO_PREPASS = NONE; // don't turn it on by default
 #define PP_DEF_ST "auto"
 Prepass_t PP_DEF_ON = AUTO; // but default to auto if turned on
@@ -86,30 +86,31 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define SCOUR_L 4
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	printf("\nBURST aligner (v0.99.3f; DB%d version)\n", SCOUR_N); \
+	printf("\nBURST aligner (v0.99.4a; DB%d version)\n", SCOUR_N); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	printf("\nBasic parameters:\n");\
-	printf("--references (-r) <name>: FASTA/edx DB of reference sequences [required)]");\
+	printf("--references (-r) <name>: FASTA/edx DB of reference sequences [required)]\n");\
 	printf("--accelerator (-a) <name>: Creates/uses a helper DB (acc/acx) [optional]\n"); \
 	puts("--queries (-q) <name>: FASTA file of queries to search for [required if aligning]");\
 	puts("--output (-o) <name>: Blast6/edb file for output alignments/database [required]");\
 	puts("\nBehavior parameters:"); \
 	puts("--forwardreverse (-fr): also search the reverse complement of queries"); \
 	puts("--whitespace (-w): write full query names in output (include whitespace)"); \
-	puts("--npenalize (-n): Force A,C,G,T,U,N,X in query to mismatch X,N in reference"); \
+	/*puts("--npenalize (-n): Force A,C,G,T,U,N,X in query to mismatch X,N in reference");*/ \
 	puts("--xalphabet (-x): Allow any alphabet and disable ambiguity matching");\
+	puts("--nwildcard (-y): Allow N,X to match anything (in query and reference)"); \
 	puts("--taxonomy (-b) <name>: taxonomy map (to interpolate, use -m CAPITALIST)");\
 	puts("--mode (-m) <name>: Pick an alignment reporting mode by name. Available modes:");\
-	puts("  BEST (reports first best match by hybrid BLAST id) [default]"); \
-	puts("  ALLPATHS (reports all ties with same error profile)"); \
-	puts("  CAPITALIST (reports minimal set of references among ties)"); \
-	puts("  FORAGE (reports all matches above specified threshold"); \
+	puts("  BEST (report first best match by hybrid BLAST id)"); \
+	puts("  ALLPATHS (report all ties with same error profile)"); \
+	puts("  CAPITALIST (minimize set of references AND interpolate taxonomy) [default]"); \
+	puts("  FORAGE (report all matches above specified threshold"); \
 	/*puts("  [not enabled]: PAIRED, MAPPED, INLINE");*/ \
 	puts("--makedb (-d) [name qLen]: Create a database from input references");\
 	printf("  [name]: Optional. Can be DNA, RNA, or QUICK [QUICK]\n");\
-	printf("  [qLen]: Optional, reqs [name]. Max query length to search in DB [%d]\n",DB_QLEN); \
+	printf("  [qLen]: Optional. Max query length to search in DB [%d]\n",DB_QLEN); \
 	printf("\nPerformance parameters:\n"); \
-	printf("--taxacut (-bc) <int>: allow 1/<int> [1/%u] disagreeing taxonomy calls\n",TAXACUT); \
+	printf("--taxacut (-bc) <int>: allow 1/<int> disagreeing taxonomy calls. 1/[%u]\n",TAXACUT); \
 	printf("--taxa_ncbi (-bn): Assume NCBI header format '>xxx|accsn...' for taxonomy\n"); \
 	printf("--skipambig (-sa): Do not consider highly ambiguous queries (5+ ambigs)\n"); \
 	printf("--taxasuppress (-bs) [STRICT]: Surpress taxonomic specificity by %%ID\n"); \
@@ -117,16 +118,16 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	printf("--threads (-t) <int>: How many logical processors to use [%u]\n",THREADS);\
 	printf("--shear (-s) [len]: Shear references longer than [len] bases [%ld]\n",REBASE_AMT);\
 	/*printf("--unique (-u): Dereplicate references (lossless preprocessing)\n");*/ \
-	printf("--fingerprint (-f): Use sketch fingerprinting to precheck matches [or cluster db]\n"); \
+	printf("--fingerprint (-f): Use sketch fingerprints to precheck matches (or cluster db)\n"); \
 	printf("--prepass (-p) [speed]: use fingerprints to pre-filter matches ["PP_DEF_ST"]\n"); \
 	printf("  [speed]: Optional. Can be 'auto', full', 'fast', 'reorder', 'none'\n"); \
 	/*printf("--cache (-c) <int>: Performance tweaking parameter [%d]\n",cacheSz); */ \
 	/* printf("--latency (-l) <int>: Performance tweaking parameter [%d]\n",LATENCY); */ \
-	printf("--clustradius (-cr) <int>: Performance tweaking parameter [auto]\n"); \
+	/*printf("--clustradius (-cr) <int>: Performance tweaking parameter [auto]\n");*/ \
 	puts("\n--help (-h): Shows this help screen with version info"); \
-	puts("\nExample: burst -r myRefs.fasta -q myQs.fasta -o outputs.txt -i 0.98");\
-	puts("\nLicensed under the GNU Affero General Public License v3.0");\
-	exit(1);\
+	puts("\nExample: burst -r myRefs.fasta -q myQs.fasta -o outputs.txt -i 0.98"); \
+	puts("\nLicensed under the GNU Affero General Public License v3.0"); \
+	exit(1); \
 }
 
 #define GAP 1
@@ -135,7 +136,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define EDX_VERSION 3
 #define ACC_VERSION 0
 #define ACC_VERSION_BIG 1
-char Z = 0; // N mismatch penalty
+char Z = 1; // N mismatch penalty
 char *BAK = "\0ACGTNKMRYSWBVHD\0"; 
 char *RVC = "\0TGCANMKYRSWVBDH\0";
 char RVT[] = {0,4,3,2,1,5,7,6,9,8,10,11,13,12,15,14};
@@ -259,6 +260,7 @@ typedef struct {
 
 	uint32_t *BadList, badListSz;
 	void **Accelerators;
+	DBType dbType;
 } Reference_Data;
 
 typedef struct {
@@ -468,7 +470,7 @@ size_t parse_tl_fasta_db(char *ref_FN, char ***HeadersP, char **SeqsP,
 		 *Seqs = malloc(cur_len * sizeof(*Seqs));
 	uint64_t *Offsets = malloc(cur_sz * sizeof(*Offsets)), 
 		cur_off = -1, ns = -1;
-	char *line = malloc(linelen); // assume 16-bit aligned on 64-bit
+	char *line = malloc(linelen), *lineO = line; 
 	if (!line) {fputs("OOM:ptfdLn\n",stderr); exit(3);}
 	int lastHd = 0;
 	while (line = fgets(line, linelen, file)) {
@@ -1621,19 +1623,20 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		double similarity = 0.06;
 		#pragma omp parallel for reduction(+:tot_cl)
 		for (uint32_t i = 0; i < totR; ++i) tot_cl += FP_pop(p+i);
-		uint32_t sig_thres = Rd->clustradius ?: 1 + similarity * (double)tot_cl/totR;
-		if (!Rd->clustradius && sig_thres < 5) sig_thres = 5;
-		else if (sig_thres > 999) similarity = (double)(sig_thres-1000)/1000, sig_thres = 0;
+		uint32_t sig_thres = Rd->clustradius; // + similarity * (double)tot_cl/totR;
+		//if (!Rd->clustradius && sig_thres < 5) sig_thres = 5;
+		//else if (sig_thres > 999) similarity = (double)(sig_thres-1000)/1000, sig_thres = 0;
+		#define GMIN 250
+		sig_thres = MIN(GMIN,sig_thres); // make this MING
 		printf("Average coverage (atomic) = %f, cluster radius: %u\n",(double)tot_cl/totR, sig_thres);
-		#define PTHRES 240
-		#define PTHRES2 240
+		//#define PTHRES2 240
 		uint32_t IXBIN[THREADS];
 		
 		
 		// The direct fingerprint way
 		double wtime = omp_get_wtime();
 		#define BANDED_FP 1000000
-		// Heuristic: sort FPs by first 16 bits (Prince.h), then iterate over bounded range
+		// Heuristic: sort FPs by first few bits (Prince.h), then iterate over bounded range
 		if (BANDED_FP) {
 			uint32_t *WordRange = malloc(totR*sizeof(*WordRange));
 			uint32_t *RefLen = Rd->RefLen;
@@ -1710,145 +1713,243 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			// TODO: use just this grouping as "fast clustering"
 		}
 
-		Split **CC = calloc((totR-0),sizeof(*CC));
-		if (!CC) {fputs("OOM:FP:CC\n",stderr); exit(3);}
-		uint64_t numLinks = 0;
+		// New clusterer: faster, more ram-friendly
+		// Idea: for each ref, store 2 things: error (minimum) and array of neighbors at that minimum
+		// Struct[]: {Min, NeibList[]}
+		// Then one sort on Min accomplishes entire sort
+
+		// CC currently stores {score, which}
+		//Split **CC = calloc((totR-0),sizeof(*CC));
+		//if (!CC) {fputs("OOM:FP:CC\n",stderr); exit(3);}
+		//uint64_t numLinks = 0;
+		wtime = omp_get_wtime();
+		printf("Scanning for clusters...");
+		//#define XBASE 4
+		typedef struct { uint32_t min, ix, *Neibs; } Dists;
+		Dists *X = calloc(totR,sizeof(*X));
+		if (!X) {fputs("OOM:Dists\n",stderr); exit(3);}
+		//for (uint32_t i = 0; i < totR; ++i) {
+			//uint32_t *N = malloc(XBASE*sizeof(*N));
+			//if (!N) {fputs("OOM:Neibs[i]\n",stderr); exit(3);}
+			//X[i] = (Dists){256,0,0};
+		//}
+		//puts("Done!");
+		uint32_t bufSz = MIN(BANDED_FP+1,totR);
+		//static const uint32_t GMIN = 250; // const above
 		#pragma omp parallel
 		{
-			Split *CCL = malloc(totR*sizeof(*CCL));
-			if (!CCL) {fputs("OOM:CCL\n",stderr); exit(3);}
-			#pragma omp for schedule(dynamic,1) reduction(+:numLinks)
+			uint32_t *Buf = malloc(bufSz*sizeof(*Buf));
+			#pragma omp for schedule(dynamic,1)
 			for (uint32_t i = 0; i < totR; ++i) {
-				// Get all the acceptable unions for this reference
-				uint32_t cpop = FP_pop(p+i), x = 0,
-					st = cpop + (sig_thres ?: similarity * cpop);
-				if (cpop > PTHRES) continue; // otherwise they'll match mostly anything
-				st = MIN(st,PTHRES2); // FPs aren't useful past this range
-				uint32_t bounds = MIN(totR, (i+1)+BANDED_FP);
-				for (uint32_t j = i + 1, t; j < bounds; ++j) 
-					if ((t=FP_union(p[i],p[j])) < st) CCL[x++] = (Split){t,j};
-				// or do something like MIN16 instead of arbitrary threshold?
+				if (FP_pop(p + i) >= GMIN) continue; // skip this ref
+				uint32_t lo = 0, hi = totR;
+				if (i > BANDED_FP/2) lo = i - BANDED_FP/2; // stack against left edge
+				if (lo + BANDED_FP < totR) hi = lo + BANDED_FP;
+				else if (hi > BANDED_FP) //if (hi - lo < totR && hi - lo < BANDED_FP)
+					lo = hi - BANDED_FP; // stack against right edge
+				//bounds = MIN(totR, (i+1)+BANDED_FP);
+				uint32_t min=GMIN, minh = MIN(GMIN, min + sig_thres), n=0;
 				
-				// Store results. First bin is {length,max_ix}
-				if (x) { // make a new bin, copy these in. 
-					CC[i] = malloc((x+1)*sizeof(*CC[i]));
-					for (uint32_t j = 0; j < x; ++j) {
-						CC[i][j+1] = CCL[j];
+				for (uint32_t j = lo; j < hi; ++j) {
+					if (i == j) continue;
+					uint32_t score = FP_union(p[i],p[j]);
+					if (score <= minh) {
+						if (score < min) { 
+							if (score + sig_thres < min) n = 0; // dirty: stragglers under new minh can creep in over time
+							min = score, minh = MIN(GMIN, min + sig_thres);
+						}
+						Buf[n++] = j;
 					}
-					CC[i][0] = (Split){x,0}; //mix}; // store num bins for easy lookup
-					numLinks += x;
 				}
+				// Two options: memory-subsystem-heavy or ram-bandwidth-heavy
+				// [/] Option 1: realloc the original and store it, then malloc a new buffer
+				// [x] Option 2: malloc a new array, copy the buffer into it
+				/*if (n) { 
+					X[i] = (Dists){min, n, realloc(Buf, n*sizeof(*Buf))};
+					Buf = malloc(bufSz*sizeof(*Buf));
+					if (!Buf) {fputs("OOM:Buf:2b\n",stderr); exit(3);}
+				} else X[i].min = GMIN + 1;*/
+				if (n) {
+					uint32_t *Z = malloc(n*sizeof(*Z));
+					if (!Z) {fputs("OOM:Buf:2Z\n",stderr); exit(3);}
+					memcpy(Z,Buf,n*sizeof(*Z)); // do it yourself in reverse?
+					//for (uint32_t k = n; k; --k) Z[k-1] = Buf[k-1];
+					X[i] = (Dists){min,n,Z};
+				} else X[i].min = GMIN + 1;
 			}
-			free(CCL);
+			free(Buf);
 		}
+		
+		if (sig_thres) {
+			#pragma omp parallel for schedule(dynamic)
+			for (uint32_t i = 0; i < totR; ++i) if (X[i].ix) {
+				// Correct bulge seep
+				uint32_t nx = 0, minh = X[i].min + sig_thres,
+					*List = X[i].Neibs;
+				for (uint32_t j = 0; j < X[i].ix; ++j) 
+					if (FP_union(p[i],p[List[j]]) <= minh)
+						List[nx++] = List[j];
+				X[i].ix = nx;
+				X[i].Neibs = realloc(List,nx*sizeof(*List));
+			}
+		}
+		printf("Complete (%f).\n",omp_get_wtime()-wtime);
+		
 		// To cluster: sort all pairs within threshold cost of fusion
 		// Pick off the lowest available, use as centroid if val not -1.
 		// Search through everything in 32u_1 and 32u_2's bins for best match, combine, finalize cluster
 		// Set each used centroid and all matches to {-1,-1} to indicate it's spent
 
-		uint64_t numEmpty = 0;
-		for (uint32_t i = 0; i < totR; ++i) numEmpty+=!CC[i];
+		// The goal now (new min clustering) is to sort the clusters using an index mask.
+		// Since there is only one min value per reference, we only need 'totR' indices.
+		// Thus, ranking the totR indices themselves, we traverse down a sorted list of links
+		// by descending into each of the 'totR' sorted Neibs arrays in sorted order. 
+		// We have the added advantage of being able to rapidly skip links when a Neibs array
+		// reports that its reference was already used up (skip to the next Neibs array).
+		// Deciding a cluster centroid is as before: seed a cluster of refs {i,j} with Neibs[i] = j
+		// and add other members through the neighborlists of i and j or by scanning refs directly.
+
+		wtime = omp_get_wtime();
+		uint64_t numEmpty = 0, numLinks = 0;
+		for (uint32_t i = 0; i < totR; ++i) numEmpty+=!X[i].ix, numLinks += X[i].ix; // was !CC[i]
 		printf("There are %llu links (%f) and %llu empties (%f)\n",
 			numLinks,(double)numLinks/totR,numEmpty,(double)numEmpty/totR);
 		if (!numLinks) {fputs("ERROR: no qualifying clusters.\n",stderr); exit(4);}
 
-		Split *SrtIx_cent = malloc(numLinks*sizeof(*SrtIx_cent));
-		uint16_t *Connectivity = malloc(totR*sizeof(*Connectivity));
-		for (uint32_t i = 0; i < totR; ++i) Connectivity[i] = 1;
-		
-		if (!SrtIx_cent) // || !SrtIx_y || !Y_bins) 
-			{fputs("OOM:SrtIx_cent\n",stderr); exit(3);}
-		
-		printf("Time to make clusters: %f\n",omp_get_wtime()-wtime);
-		wtime = omp_get_wtime();
-		#pragma omp parallel sections
+		// sort totR indices by min, ascending
+		uint32_t *SrtIx = malloc(totR*sizeof(*SrtIx)), endcap = 0;
 		{
-			#pragma omp section
-			{	// Create population queue
-				uint64_t Popper[258] = {0}, *P_bins = Popper + 1;
-				for (uint32_t i = 0; i < totR; ++i) if (CC[i]) {
-					for (uint32_t j = 1; j <= CC[i][0].v; ++j)
-						++P_bins[CC[i][j].v];
-				}
-				--P_bins;
-				for (uint32_t i = 1; i <= 256; ++i) 
-					P_bins[i] += P_bins[i-1];
-				for (uint32_t i = 0; i < totR; ++i) if (CC[i])
-					for (uint32_t j = 1; j <= CC[i][0].v; ++j)
-						SrtIx_cent[P_bins[CC[i][j].v]++] = (Split){i,j};
-			}
-			#pragma omp section
-			{
-				for (uint32_t i = 0; i < totR; ++i) if (CC[i]) {
-					uint64_t pop_tot = 0;
-					for (uint32_t j = 1; j <= CC[i][0].v; ++j) {
-						pop_tot += CC[i][j].v;
-						Connectivity[CC[i][j].i] += Connectivity[CC[i][j].i] < UINT16_MAX;
-					}
-					Connectivity[i] = MIN(UINT16_MAX, (uint64_t)Connectivity[i] + CC[i][0].v);
-				}
-			}
+			uint32_t Popper[258] = {0}, *P_bins = Popper + 1;
+			for (uint32_t i = 0; i < totR; ++i) 
+				++P_bins[X[i].min];
+			--P_bins;
+			for (uint32_t i = 1; i <= 256; ++i) 
+				P_bins[i] += P_bins[i-1];
+			for (uint32_t i = 0; i < totR; ++i)
+				SrtIx[P_bins[X[i].min]++] = i;
+			endcap = P_bins[GMIN]; //anything after this is guaranteed unpaired
 		}
-		printf("Time to sort: %f\n",omp_get_wtime()-wtime);
-		// do the clustering
+		printf("Time to sort: %f\n",omp_get_wtime() - wtime);
+		printf("DEBUG: endcap at %u (current total = %u, prev = %u)\n",
+			endcap, X[endcap].ix, X[endcap-1].ix);
+		
+		// TODO:
+		// A secondary sort can be applied at this stage within each Neib array so that the 
+		// neibors (of equal combined min) are ordered according to some other criterion. 
+		// One such way used in the past is 'xor distance' of the two, which may downweight 
+		// pairings scoring low due merely to population sparsity in one of the members.
+
 		wtime = omp_get_wtime();
-		uint64_t c_ix = 0;
+		uint64_t c_ix = 0, emEx = 0;
 		uint32_t fp_ix = 0, *ClusIX = malloc(totR*sizeof(*ClusIX)); // to store the re-ordered references
 		Prince *UnionPrince = malloc(totRC*sizeof(*UnionPrince));
 		uint64_t totalPop = 0;
-		for (uint64_t i = 0; i < numLinks; ++i) {
-			uint32_t c1 = SrtIx_cent[i].v, y = SrtIx_cent[i].i;
-			if (!Connectivity[c1]) continue; // first member is dead
-			uint32_t c2 = CC[c1][y].i;
-			if (!Connectivity[c2]) continue;
+		for (uint64_t i = 0; i < endcap; ++i) {
+			uint32_t c1 = SrtIx[i], c2 = -1; // These are our two 'founding' refs for this cluster.
+			if (!X[c1].ix) continue; // this ref is dead or already clustered
+			// run through until we find a valid neighbor [select 'best' valid neighbor in realtime?]
+			uint32_t *List = X[c1].Neibs;
+			uint32_t ii = 0; while (ii < X[c1].ix && !X[List[ii]].ix) ++ii;
+			//if (ii == X[c1].ix) continue;
+			if (ii == X[c1].ix) { //continue; // No valid neighbors; skip (for now?)?
+				//find another seed neighbor
+				uint32_t lo = c1 > BANDED_FP/2 ? c1 - BANDED_FP/2 : 0,
+					hi = c1 + BANDED_FP/2 < totR ? c1 + BANDED_FP/2 : totR,
+					minS = 257, m_ix = -1;
+				#pragma omp parallel 
+				{
+					uint32_t mi = -1, mm = -1;
+					#pragma omp for reduction(min:minS)
+					for (uint32_t j = lo; j < hi; ++j) if (X[j].ix && c1 != j) {
+						uint32_t t = FP_union(p[c1], p[j]), tp;
+							if (t < minS) minS = mm = t, mi = j;
+					}
+					IXBIN[omp_get_thread_num()] = mm == minS ? mi : -1; // reduction holster
+				}
+				//if (minS > ((GMIN+3*X[c1].min)/4)) continue; // no luck
+				if (minS > MIN(X[c1].min + sig_thres + 4,GMIN)) continue; // no luck
+				for (uint32_t j = 0; j < THREADS; ++j)
+					if (IXBIN[j] < m_ix) m_ix = IXBIN[j];
+					//if (IXBIN[j] != -1) {m_ix = IXBIN[j]; break;}
+				c2 = m_ix;
+			} else 
+				c2 = List[ii];
+			// DEBUG only: select best of set 
+			/* uint32_t bst = FP_union(p[c1],p[X[List[ii]].ix]);
+			for (uint32_t f = ii; f < X[c1].ix; ++f) {
+				uint32_t t;
+				if (X[List[f]].ix && (t=FP_union(p[c1],p[List[f]])) < bst)
+					bst = t, ii = f;
+			} */
+
 			Prince centroid = FP_combine(p[c1],p[c2]); // and now its pop is in "cost"
 			ClusIX[c_ix++] = c1;
 			ClusIX[c_ix++] = c2;
-			Connectivity[c1] = Connectivity[c2] = 0;
+			X[c1].ix = X[c2].ix = 0; // We have deaddened these refs. (Will we need to go through them again?)
 			
-			uint32_t min, mix;
-			uint32_t start, end;
-			if (c2 > BANDED_FP) start = c2 - BANDED_FP,	end = c2;
-			else start = 0,	end = MIN(totR, BANDED_FP);
+			// Search band around center of c1, c2
+			//uint64_t ctr = ((uint64_t)c1 + c2) << 1; 
+			
+			// Search half a band less than lo and half a band more than hi?
+			uint32_t lo, hi;
+			if (c2 > c1) lo = c2, hi = c1;
+			else lo = c1, hi = c2;
+			uint32_t min, mix, start, end;
+			start = lo > BANDED_FP/2 ? lo - BANDED_FP/2 : 0;
+			end = hi + BANDED_FP/2 < totR ? hi + BANDED_FP/2 : totR;
+			
+			//if (c2 > BANDED_FP) start = c2 - BANDED_FP,	end = c2; 
+			//else start = 0,	end = MIN(totR, BANDED_FP); // Should we end our range at the greater c of c1,c2?
 			for (int z = 0; z < (VECSZ-2); ++z) {
 				min = 257; //, mix = -1
+
+				// The old technique minimized a triple-tiebreak objective to select a new member:
+				// 1) Minimum score; of the ties:
+				// 2) Minimum connectivity (to prioritize selecting refs with fewer options); of the ties:
+				// 3) Minimum xor distance
+				// The new method will start similiar but maybe worth going simpler: any minimum score?
+				// Another alternative would be to actually weight by all 3 and take the true min afterward.
+				// Update: connectivity criterion eliminated.
+
 				#pragma omp parallel
 				{
 					uint32_t mp = -1, mi, bp = -1;
 					#pragma omp for reduction(min:min)
-					for (uint32_t j = start; j < end; ++j) if (Connectivity[j]) { 
+					for (uint32_t j = start; j < end; ++j) if (X[j].ix) { //if (Connectivity[j]) { 
 						uint32_t t = FP_union(centroid, p[j]), tp;
 						if (t < min) min = mp = t, mi = j, bp = FP_dist(p[j],centroid);
-						else if (t == min && Connectivity[j] < Connectivity[mi]) 
-							mi = j, bp = FP_dist(p[j],centroid);
-						else if (t == min && Connectivity[j] == Connectivity[mi] && (tp=FP_dist(p[j],centroid)) < bp)
+						//else if (t == min && X[j].ix < X[mi].ix) 
+						//	mi = j, bp = FP_dist(p[j],centroid);
+						else if (t == min /*&& X[j].ix == X[mi].ix*/ && (tp=FP_dist(p[j],centroid)) < bp)
 							mi = j, bp = tp;
 					}
-					IXBIN[omp_get_thread_num()] = mp == min ? mi : -1;
+					IXBIN[omp_get_thread_num()] = mp == min ? mi : -1; // reduction holster
 				}
 				uint32_t bestC = -1, bestP = -1, t;
 				for (int j = 0; j < THREADS; ++j) {
 					if (IXBIN[j] != -1) {
-						if (Connectivity[IXBIN[j]] < bestC) //(t=FP_dist(p[IXBIN[j]],centroid)) < bestP)  
-							mix = IXBIN[j], bestC = Connectivity[mix], bestP = FP_dist(p[IXBIN[j]],centroid); 
-						else if (Connectivity[IXBIN[j]] == bestC && (t=FP_dist(p[IXBIN[j]],centroid)) < bestP) 
-							mix = IXBIN[j], bestP = t; 
-						else if (Connectivity[IXBIN[j]] == bestC && FP_dist(p[IXBIN[j]],centroid) == bestP && IXBIN[j] < mix)
+						//if (X[IXBIN[j]].ix < bestC) //(t=FP_dist(p[IXBIN[j]],centroid)) < bestP)  
+						//	mix = IXBIN[j], bestC = X[mix].ix, bestP = FP_dist(p[IXBIN[j]],centroid); 
+						//else 
+							if (/* X[IXBIN[j]].ix == bestC && */ (t=FP_dist(p[IXBIN[j]],centroid)) < bestP) 
+								mix = IXBIN[j], bestP = t; 
+						else if (/*X[IXBIN[j]].ix == bestC && */ FP_dist(p[IXBIN[j]],centroid) == bestP && IXBIN[j] < mix)
 							mix = IXBIN[j]; 
 					}
 				}
-				if (min > 256) { // Expand the reach -- backwards first	
+				if (min > 256) { // Emergency expansion of radius for incomplete clusters -- backwards first
+					++emEx;
 					uint32_t j = start; 
-					if (j--) do if (Connectivity[j]) {
+					if (j--) do if (X[j].ix) { // pick the first eligible bachelor
 						centroid = FP_combine(centroid, p[j]);
 						ClusIX[c_ix++] = j;
-						Connectivity[j] = 0;
+						X[j].ix = 0;
 						if (++z == VECSZ-2) break;
 					} while (j--);
-					if (j==-1) for (j = end+1; j < totR; ++j) if (Connectivity[j]) {
+					if (j==-1) for (j = end+1; j < totR; ++j) if (X[j].ix) {
 						centroid = FP_combine(centroid, p[j]);
 						ClusIX[c_ix++] = j;
-						Connectivity[j] = 0;
+						X[j].ix = 0;
 						if (++z == VECSZ-2) break;
 					}
 					if (z != VECSZ-2) {
@@ -1860,28 +1961,35 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				}
 				centroid = FP_combine(centroid, p[mix]);
 				ClusIX[c_ix++] = mix;
-				Connectivity[mix] = 0;
+				X[mix].ix = 0;
 			}
 			UnionPrince[fp_ix++] = centroid;
 			totalPop += min;
 			printf("\r[%f]: Finalizing cluster %u", (double)totalPop/fp_ix, fp_ix);
 		}
+		/////////////////
+
 		FP_ENDGAME:NULL;
 		printf("\nTime to cluster: %f\n",omp_get_wtime()-wtime);
 		printf("\nDone. Reads safely tucked into clusters: %u\n",c_ix);
 		printf("Considering all clusters: %f\n",(double)(totalPop+256*(totRC-fp_ix))/totRC);
+		printf("Emergency expansion proportion: %f\n",(double)emEx/totRC);
 
-		if (c_ix < totR) for (uint32_t i = 0; i < totR; ++i) if (Connectivity[i]) ClusIX[c_ix++] = i;
+		// Find refs that weren't clustered and add them randomly
+		if (c_ix < totR) for (uint32_t i = 0; i < totR; ++i) if (X[i].ix) ClusIX[c_ix++] = i;
 		Prince badP; badP.w[0] = -1, badP.w[1] = -1, badP.w[2] = -1, badP.w[3] = -1;
 		for (uint32_t i = fp_ix; i < totRC; ++i) UnionPrince[i] = badP;
 		totalPop = 0;
 		for (uint32_t i = 0; i < totRC; ++i) totalPop += FP_pop(UnionPrince + i);
 
 		printf("Added remainder to the bin. Total avg: %f\n",(double)totalPop/totRC);
-		for (uint32_t i = 0; i < totR; ++i) free(CC[i]);
-		free(CC);
-		free(Connectivity); // reuse Connectivity for new RefIxSrt, free old RefIxSrt
-		free(SrtIx_cent);
+		//for (uint32_t i = 0; i < totR; ++i) free(CC[i]);
+		//free(CC);
+		//free(Connectivity); // reuse Connectivity for new RefIxSrt, free old RefIxSrt
+		//free(SrtIx_cent);
+		for (uint32_t i = 0; i < totR; ++i) free(X[i].Neibs);
+		free(X);
+		free(SrtIx);
 		//#pragma omp sections
 		{
 			//#pragma omp section
@@ -4129,6 +4237,10 @@ int main( int argc, char *argv[] ) {
 			Z = 1; // global
 			printf(" --> Setting N penalty (ref N vs query A/C/G/T).\n");
 		}
+		else if (!strcmp(argv[i],"--nwildcard") || !strcmp(argv[i],"-y")) {
+			Z = 0; // global
+			printf(" --> Setting N's and X's to wildcards (match anything).\n");
+		}
 		else if (!strcmp(argv[i],"--xalphabet") || !strcmp(argv[i],"-x")) {
 			Xalpha = 1; // global
 			printf(" --> Allowing any alphabet (unambiguous ID matching).\n");
@@ -4153,7 +4265,7 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--makedb") || !strcmp(argv[i],"-d")) {
 			makedb = 1; char *dbsel = "QUICK"; // make this read the default
-			if (i + 1 != argc && argv[i+1][0] != '-') { // arg provided
+			if (i + 1 != argc && argv[i+1][0] != '-' && !atol(argv[i+1])) { // non-numeric arg
 				if (!strcmp(argv[++i],"DNA")) dbType = DNA_16;
 				else if (!strcmp(argv[i],"RNA")) dbType = DNA_16;
 				/*else if (!strcmp(argv[i],"PROTEIN")) dbType = PROT;*/
@@ -4161,10 +4273,10 @@ int main( int argc, char *argv[] ) {
 				else {printf("Unsupported makedb mode '%s'\n",argv[i]); exit(1);};
 				dbsel = argv[i];
 			}
-			if (i + 1 != argc && argv[i+1][0] != '-') { // another arg provided
+			if (i + 1 != argc && argv[i+1][0] != '-') { // numeric arg provided
 				DB_QLEN = atol(argv[++i]);
-				if (DB_QLEN < 0) {fprintf(stderr,"ERROR: bad max query length '%s'\n",argv[i]); exit(1);}
-				if (DB_QLEN < 5) printf("WARNING: query length very short (%ld)\n",DB_QLEN);
+				if (DB_QLEN <= 0) {fprintf(stderr,"ERROR: bad max query length '%s'\n",argv[i]); exit(1);}
+				if (DB_QLEN < 8) printf("WARNING: query length very short (%ld)\n",DB_QLEN);
 			}
 			printf(" --> Creating %s database (assuming max query length %ld)\n",dbsel, DB_QLEN);
 		}
@@ -4270,7 +4382,7 @@ int main( int argc, char *argv[] ) {
 		}
 	}
 	FILE *output = fopen(output_FN,"wb");
-	if (!output) {fprintf(stderr,"ERROR: Cannot open output: %s",output_FN); exit(2);}
+	if (!output) {fprintf(stderr,"ERROR: Cannot open output: %s\n",output_FN); exit(2);}
 
 #ifdef _OPENMP
 	omp_set_num_threads(THREADS);
