@@ -35,15 +35,15 @@ See [Releases](https://github.com/knights-lab/burst/releases) page for precompil
 ### Fastest (short version):
 1. Create initial database
 ```
-burst -d -s -a MyDB.acc -f -n -o MyDB.edb -r MyDB.fasta
+burst -r MyDB.fasta -a MyDB.acc -o MyDB.edb -f -d -s
 ```
-2. Run again to convert edb to smaller edx format
+2. Run again to convert acc to smaller acx format
 ```
-burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb
+burst -r MyDB.edb -a MyDB.acc -o /dev/null
 ```
-3. Run again to convert acc to acx format. Also remove unneeded acc and edb files.
+3. Run again to convert edb to edx format. Also remove unneeded acc and edb files.
 ```
-burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx
+burst -r MyDB.edb -o /dev/null
 rm RefDB.acc RefDB.edb
 ```
 
