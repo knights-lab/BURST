@@ -2,6 +2,7 @@
 Copyright (C) 2015-2017 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
+#define VER "v0.99.4b"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -86,12 +87,12 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 #define SCOUR_L 4
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define PRINT_USAGE() { \
-	printf("\nBURST aligner (v0.99.4a; DB%d version)\n", SCOUR_N); \
+	printf("\nBURST aligner (" VER "; DB%d version)\n", SCOUR_N); \
 	printf("Compiled with " ASMVER " and%s multithreading\n", !HAS_OMP ? " WITHOUT" : "");\
 	printf("\nBasic parameters:\n");\
 	printf("--references (-r) <name>: FASTA/edx DB of reference sequences [required)]\n");\
 	printf("--accelerator (-a) <name>: Creates/uses a helper DB (acc/acx) [optional]\n"); \
-	puts("--queries (-q) <name>: FASTA file of queries to search for [required if aligning]");\
+	puts("--queries (-q) <name>: FASTA file of queries to search [required if aligning]");\
 	puts("--output (-o) <name>: Blast6/edb file for output alignments/database [required]");\
 	puts("\nBehavior parameters:"); \
 	puts("--forwardreverse (-fr): also search the reverse complement of queries"); \
@@ -1440,8 +1441,105 @@ static inline Prince FP_combine(Prince a, Prince b) {
 	return x;
 }
 
-// make_db_fasta() GOES HERE
-
+static inline Split FP_union16x2_NV(Prince *P1, Prince *P2) {
+	Prince *P = P1, p[8], s;
+	p[0] = FP_combine(P[0],P[1]);
+	p[1] = FP_combine(P[2],P[3]);
+	p[2] = FP_combine(P[4],P[5]);
+	p[3] = FP_combine(P[6],P[7]);
+	p[4] = FP_combine(P[8],P[9]);
+	p[5] = FP_combine(P[10],P[11]);
+	p[6] = FP_combine(P[12],P[13]);
+	p[7] = FP_combine(P[14],P[15]);
+	
+	p[0] = FP_combine(p[0],p[1]);
+	p[1] = FP_combine(p[2],p[3]);
+	p[2] = FP_combine(p[4],p[5]);
+	p[3] = FP_combine(p[6],p[7]);
+	
+	p[0] = FP_combine(p[0],p[1]);
+	p[1] = FP_combine(p[2],p[3]);
+	s = FP_combine(p[0],p[1]);
+	
+	P = P2;
+	p[0] = FP_combine(P[0],P[1]);
+	p[1] = FP_combine(P[2],P[3]);
+	p[2] = FP_combine(P[4],P[5]);
+	p[3] = FP_combine(P[6],P[7]);
+	p[4] = FP_combine(P[8],P[9]);
+	p[5] = FP_combine(P[10],P[11]);
+	p[6] = FP_combine(P[12],P[13]);
+	p[7] = FP_combine(P[14],P[15]);
+	
+	p[0] = FP_combine(p[0],p[1]);
+	p[1] = FP_combine(p[2],p[3]);
+	p[2] = FP_combine(p[4],p[5]);
+	p[3] = FP_combine(p[6],p[7]);
+	
+	p[0] = FP_combine(p[0],p[1]);
+	p[1] = FP_combine(p[2],p[3]);
+	
+	p[0] = FP_combine(p[0],p[1]);
+	
+	return (Split){FP_pop(&s),FP_pop(p)};
+}
+static inline Split FP_union16x2_ZA(Prince *P1, Prince *P2) {
+	Prince p1 = *P1, p2 = *P2;
+	for (int i = 1; i < 16; ++i)
+		p1 = FP_combine(p1,P1[i]),
+		p2 = FP_combine(p2,P2[i]);
+	return (Split){FP_pop(&p1),FP_pop(&p2)};
+}
+#ifdef __AVX__
+static inline Split FP_union16x2_AVX(Prince *P1, Prince *P2) {
+	#ifdef __AVX2__
+		#define REG __m256i
+		#define LOAD(x) _mm256_load_si256((void*)(x))
+		#define STORE(m,r) _mm256_store_si256((void*)(m),r)
+		#define OR(x,y) _mm256_or_si256(x,y)
+	#else
+		#define REG __m256
+		#define LOAD(x) _mm256_load_ps((void*)(x))
+		#define STORE(m,r) _mm256_store_ps((void*)(m),r)
+		//#define STORE(m,r) _mm256_store_si256((void*)(m),_mm256_castps_si256(r))
+		#define OR(x,y) _mm256_or_ps(x,y)
+	#endif
+	Prince *P = P1;
+	REG p1 = OR(LOAD(P+0),LOAD(P+1));
+	REG p2 = OR(LOAD(P+2),LOAD(P+3));
+	REG p3 = OR(LOAD(P+4),LOAD(P+5));
+	REG p4 = OR(LOAD(P+6),LOAD(P+7));
+	REG p5 = OR(LOAD(P+8),LOAD(P+9));
+	REG p6 = OR(LOAD(P+10),LOAD(P+11));
+	REG p7 = OR(LOAD(P+12),LOAD(P+13));
+	REG p8 = OR(LOAD(P+14),LOAD(P+15));
+	p1 = OR(p1,p2), p2 = OR(p3,p4), p3 = OR(p5,p6), p4 = OR(p7,p8);
+	p1 = OR(p1,p2), p2 = OR(p3,p4);
+	Prince s;
+	STORE(&s,OR(p1,p2));
+	P = P2;
+	p1 = OR(LOAD(P+0),LOAD(P+1));
+	p2 = OR(LOAD(P+2),LOAD(P+3));
+	p3 = OR(LOAD(P+4),LOAD(P+5));
+	p4 = OR(LOAD(P+6),LOAD(P+7));
+	p5 = OR(LOAD(P+8),LOAD(P+9));
+	p6 = OR(LOAD(P+10),LOAD(P+11));
+	p7 = OR(LOAD(P+12),LOAD(P+13));
+	p8 = OR(LOAD(P+14),LOAD(P+15));
+	p1 = OR(p1,p2), p2 = OR(p3,p4), p3 = OR(p5,p6), p4 = OR(p7,p8);
+	p1 = OR(p1,p2), p2 = OR(p3,p4);
+	Prince t;
+	STORE(&t,OR(p1,p2));
+	return (Split){FP_pop(&s),FP_pop(&t)};
+}
+	#define FP_union16x2 FP_union16x2_AVX
+#else
+	#define FP_union16x2 FP_union16x2_NV
+#endif
+inline uint64_t QRand64(uint64_t *x) {
+	*x^=*x<<13; *x^=*x>>7; return *x^=*x<<17;}
+	//(*x)^=(*x)>>11; (*x)^=(*x)<<37; (*x)^=(*x)>>4; return *x;}
+			
 static inline void create_sse2_profiles(Reference_Data *Rd) {
 	if (Xalpha) return;
 	puts("WARNING: program was built without SSSE3. This may be slow.");
@@ -1627,8 +1725,8 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		//if (!Rd->clustradius && sig_thres < 5) sig_thres = 5;
 		//else if (sig_thres > 999) similarity = (double)(sig_thres-1000)/1000, sig_thres = 0;
 		#define GMIN 250
-		sig_thres = MIN(GMIN,sig_thres); // make this MING
-		printf("Average coverage (atomic) = %f, cluster radius: %u\n",(double)tot_cl/totR, sig_thres);
+		//sig_thres = MIN(GMIN,sig_thres); // make this MING
+		printf("Average coverage (atomic) = %llu [%f], cluster refinements: %u\n",tot_cl,(double)tot_cl/totR, sig_thres);
 		//#define PTHRES2 240
 		uint32_t IXBIN[THREADS];
 		
@@ -1713,283 +1811,359 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			// TODO: use just this grouping as "fast clustering"
 		}
 
-		// New clusterer: faster, more ram-friendly
-		// Idea: for each ref, store 2 things: error (minimum) and array of neighbors at that minimum
-		// Struct[]: {Min, NeibList[]}
-		// Then one sort on Min accomplishes entire sort
+		// Even newer clusterer! ME-based in pseudorandom local neighborhood
+		// Idea: Build cluster using ME/convergence 2^n members at a time over n iters.
 
-		// CC currently stores {score, which}
-		//Split **CC = calloc((totR-0),sizeof(*CC));
-		//if (!CC) {fputs("OOM:FP:CC\n",stderr); exit(3);}
-		//uint64_t numLinks = 0;
+		uint32_t tot16 = totR + (15 & (16 - (totR & 15))); //mod16
+		uint32_t *IxArray = malloc(tot16*sizeof(*IxArray));
+		uint32_t *ShfIx = malloc(tot16*sizeof(*ShfIx));
+		uint32_t *Cache = malloc(tot16*sizeof(*Cache));
+		if (!IxArray || !ShfIx || !Cache) {fputs("OOM:ShfIx\n",stderr); exit(3);}
+		printf("TotR = %u, tot16 = %u\n",totR, tot16);
 		wtime = omp_get_wtime();
-		printf("Scanning for clusters...");
-		//#define XBASE 4
-		typedef struct { uint32_t min, ix, *Neibs; } Dists;
-		Dists *X = calloc(totR,sizeof(*X));
-		if (!X) {fputs("OOM:Dists\n",stderr); exit(3);}
-		//for (uint32_t i = 0; i < totR; ++i) {
-			//uint32_t *N = malloc(XBASE*sizeof(*N));
-			//if (!N) {fputs("OOM:Neibs[i]\n",stderr); exit(3);}
-			//X[i] = (Dists){256,0,0};
-		//}
-		//puts("Done!");
-		uint32_t bufSz = MIN(BANDED_FP+1,totR);
-		//static const uint32_t GMIN = 250; // const above
-		#pragma omp parallel
-		{
-			uint32_t *Buf = malloc(bufSz*sizeof(*Buf));
-			#pragma omp for schedule(dynamic,1)
-			for (uint32_t i = 0; i < totR; ++i) {
-				if (FP_pop(p + i) >= GMIN) continue; // skip this ref
-				uint32_t lo = 0, hi = totR;
-				if (i > BANDED_FP/2) lo = i - BANDED_FP/2; // stack against left edge
-				if (lo + BANDED_FP < totR) hi = lo + BANDED_FP;
-				else if (hi > BANDED_FP) //if (hi - lo < totR && hi - lo < BANDED_FP)
-					lo = hi - BANDED_FP; // stack against right edge
-				//bounds = MIN(totR, (i+1)+BANDED_FP);
-				uint32_t min=GMIN, minh = MIN(GMIN, min + sig_thres), n=0;
-				
-				for (uint32_t j = lo; j < hi; ++j) {
-					if (i == j) continue;
-					uint32_t score = FP_union(p[i],p[j]);
-					if (score <= minh) {
-						if (score < min) { 
-							if (score + sig_thres < min) n = 0; // dirty: stragglers under new minh can creep in over time
-							min = score, minh = MIN(GMIN, min + sig_thres);
-						}
-						Buf[n++] = j;
-					}
-				}
-				// Two options: memory-subsystem-heavy or ram-bandwidth-heavy
-				// [/] Option 1: realloc the original and store it, then malloc a new buffer
-				// [x] Option 2: malloc a new array, copy the buffer into it
-				/*if (n) { 
-					X[i] = (Dists){min, n, realloc(Buf, n*sizeof(*Buf))};
-					Buf = malloc(bufSz*sizeof(*Buf));
-					if (!Buf) {fputs("OOM:Buf:2b\n",stderr); exit(3);}
-				} else X[i].min = GMIN + 1;*/
-				if (n) {
-					uint32_t *Z = malloc(n*sizeof(*Z));
-					if (!Z) {fputs("OOM:Buf:2Z\n",stderr); exit(3);}
-					memcpy(Z,Buf,n*sizeof(*Z)); // do it yourself in reverse?
-					//for (uint32_t k = n; k; --k) Z[k-1] = Buf[k-1];
-					X[i] = (Dists){min,n,Z};
-				} else X[i].min = GMIN + 1;
-			}
-			free(Buf);
-		}
-		
-		if (sig_thres) {
-			#pragma omp parallel for schedule(dynamic)
-			for (uint32_t i = 0; i < totR; ++i) if (X[i].ix) {
-				// Correct bulge seep
-				uint32_t nx = 0, minh = X[i].min + sig_thres,
-					*List = X[i].Neibs;
-				for (uint32_t j = 0; j < X[i].ix; ++j) 
-					if (FP_union(p[i],p[List[j]]) <= minh)
-						List[nx++] = List[j];
-				X[i].ix = nx;
-				X[i].Neibs = realloc(List,nx*sizeof(*List));
-			}
-		}
-		printf("Complete (%f).\n",omp_get_wtime()-wtime);
-		
-		// To cluster: sort all pairs within threshold cost of fusion
-		// Pick off the lowest available, use as centroid if val not -1.
-		// Search through everything in 32u_1 and 32u_2's bins for best match, combine, finalize cluster
-		// Set each used centroid and all matches to {-1,-1} to indicate it's spent
+		// Setup: populate IxArray and ShfIx in order
+		for (uint32_t i = 0; i < tot16; ++i) IxArray[i] = i;
+		printf("Preparing L(A(t)) L(8)...%f\n",omp_get_wtime() - wtime);
 
-		// The goal now (new min clustering) is to sort the clusters using an index mask.
-		// Since there is only one min value per reference, we only need 'totR' indices.
-		// Thus, ranking the totR indices themselves, we traverse down a sorted list of links
-		// by descending into each of the 'totR' sorted Neibs arrays in sorted order. 
-		// We have the added advantage of being able to rapidly skip links when a Neibs array
-		// reports that its reference was already used up (skip to the next Neibs array).
-		// Deciding a cluster centroid is as before: seed a cluster of refs {i,j} with Neibs[i] = j
-		// and add other members through the neighborlists of i and j or by scanning refs directly.
-
-		wtime = omp_get_wtime();
-		uint64_t numEmpty = 0, numLinks = 0;
-		for (uint32_t i = 0; i < totR; ++i) numEmpty+=!X[i].ix, numLinks += X[i].ix; // was !CC[i]
-		printf("There are %llu links (%f) and %llu empties (%f)\n",
-			numLinks,(double)numLinks/totR,numEmpty,(double)numEmpty/totR);
-		if (!numLinks) {fputs("ERROR: no qualifying clusters.\n",stderr); exit(4);}
-
-		// sort totR indices by min, ascending
-		uint32_t *SrtIx = malloc(totR*sizeof(*SrtIx)), endcap = 0;
-		{
-			uint32_t Popper[258] = {0}, *P_bins = Popper + 1;
-			for (uint32_t i = 0; i < totR; ++i) 
-				++P_bins[X[i].min];
-			--P_bins;
-			for (uint32_t i = 1; i <= 256; ++i) 
-				P_bins[i] += P_bins[i-1];
-			for (uint32_t i = 0; i < totR; ++i)
-				SrtIx[P_bins[X[i].min]++] = i;
-			endcap = P_bins[GMIN]; //anything after this is guaranteed unpaired
-		}
-		printf("Time to sort: %f\n",omp_get_wtime() - wtime);
-		printf("DEBUG: endcap at %u (current total = %u, prev = %u)\n",
-			endcap, X[endcap].ix, X[endcap-1].ix);
-		
-		// TODO:
-		// A secondary sort can be applied at this stage within each Neib array so that the 
-		// neibors (of equal combined min) are ordered according to some other criterion. 
-		// One such way used in the past is 'xor distance' of the two, which may downweight 
-		// pairings scoring low due merely to population sparsity in one of the members.
-
-		wtime = omp_get_wtime();
-		uint64_t c_ix = 0, emEx = 0;
-		uint32_t fp_ix = 0, *ClusIX = malloc(totR*sizeof(*ClusIX)); // to store the re-ordered references
-		Prince *UnionPrince = malloc(totRC*sizeof(*UnionPrince));
 		uint64_t totalPop = 0;
-		for (uint64_t i = 0; i < endcap; ++i) {
-			uint32_t c1 = SrtIx[i], c2 = -1; // These are our two 'founding' refs for this cluster.
-			if (!X[c1].ix) continue; // this ref is dead or already clustered
-			// run through until we find a valid neighbor [select 'best' valid neighbor in realtime?]
-			uint32_t *List = X[c1].Neibs;
-			uint32_t ii = 0; while (ii < X[c1].ix && !X[List[ii]].ix) ++ii;
-			//if (ii == X[c1].ix) continue;
-			if (ii == X[c1].ix) { //continue; // No valid neighbors; skip (for now?)?
-				//find another seed neighbor
-				uint32_t lo = c1 > BANDED_FP/2 ? c1 - BANDED_FP/2 : 0,
-					hi = c1 + BANDED_FP/2 < totR ? c1 + BANDED_FP/2 : totR,
-					minS = 257, m_ix = -1;
-				#pragma omp parallel 
-				{
-					uint32_t mi = -1, mm = -1;
-					#pragma omp for reduction(min:minS)
-					for (uint32_t j = lo; j < hi; ++j) if (X[j].ix && c1 != j) {
-						uint32_t t = FP_union(p[c1], p[j]), tp;
-							if (t < minS) minS = mm = t, mi = j;
-					}
-					IXBIN[omp_get_thread_num()] = mm == minS ? mi : -1; // reduction holster
+
+		#define doRand 1
+		//uint32_t *Rand_Ix = malloc((tot16/2+UINT16_MAX+2)*sizeof(*Rand_Ix));
+		uint64_t mseed = rand();
+		
+		// prepare new FP cache for greedy clusterer
+		void *P_init = 0; Prince *P = calloc_a(64,(tot16+1)*sizeof(*P),&P_init);
+		if (!P_init) {fputs("OOM:P_new\n",stderr); exit(3);}
+		for (uint32_t i = 0; i < totR; ++i) 
+			P[i] = p[i];
+		
+		uint32_t RI[THREADS];
+		//void *PC_init = 0; Prince *PC = calloc_a(64,(tot16 >> 4)*sizeof(*PC),&PC_init);
+		Prince *PC = calloc(tot16 >> 4,sizeof(*PC));
+		if (!PC) {fputs("OOM:PC_init\n",stderr); exit(3);}
+		// naive greedy clusterer
+		{
+		double wtime = omp_get_wtime();
+		Prince centroid = *P;
+		for (uint32_t j = 1; j < totR; ++j) {
+			uint32_t min = -1, mix = -1, dst = -1; 
+			#pragma omp parallel
+			{
+				uint32_t tix = -1, tmin = -1, tdst = -1;
+				#pragma omp for reduction(min:min) 
+				for (uint32_t k = j; k < MIN(totR,j+BANDED_FP); ++k) { // TODO: replace totR with MIN(totR, j+BANDED_FP)
+					uint32_t t = FP_union(centroid,P[k]), td;
+					if (t < min) min = tmin = t, tix = k, tdst = FP_dist(centroid,P[k]);
+					else if (t == min && (td=FP_dist(centroid,P[k])) < tdst)
+						tix = k, tdst = td;
 				}
-				//if (minS > ((GMIN+3*X[c1].min)/4)) continue; // no luck
-				if (minS > MIN(X[c1].min + sig_thres + 4,GMIN)) continue; // no luck
-				for (uint32_t j = 0; j < THREADS; ++j)
-					if (IXBIN[j] < m_ix) m_ix = IXBIN[j];
-					//if (IXBIN[j] != -1) {m_ix = IXBIN[j]; break;}
-				c2 = m_ix;
-			} else 
-				c2 = List[ii];
-			// DEBUG only: select best of set 
-			/* uint32_t bst = FP_union(p[c1],p[X[List[ii]].ix]);
-			for (uint32_t f = ii; f < X[c1].ix; ++f) {
-				uint32_t t;
-				if (X[List[f]].ix && (t=FP_union(p[c1],p[List[f]])) < bst)
-					bst = t, ii = f;
+				RI[omp_get_thread_num()] = tmin == min ? tix : -1;
+			}
+			uint32_t t;
+			for (uint32_t k = 0; k < THREADS; ++k)
+				if (RI[k] != -1 && ((t=FP_dist(centroid,P[RI[k]])) < dst || 
+					(t==dst && RI[k] < mix))) mix = RI[k];
+			centroid = FP_combine(centroid,P[mix]); // amend centroid
+			Prince tp = P[j]; P[j] = P[mix]; P[mix] = tp;
+			uint32_t x = IxArray[j]; IxArray[j] = IxArray[mix]; IxArray[mix] = x;
+			if (!((j+1) & 15)) PC[j >> 4] = centroid, centroid = P[j+1];
+			if (j & 255) printf("\rClustered %u...\r",j);
+		}
+		if (totR < tot16) PC[totR >> 4] = centroid;
+		
+		printf("\nDone with greedy (%f)\n", omp_get_wtime() - wtime);
+		totalPop = 0;
+		for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += FP_pop(PC+i);
+		printf("Starting at %llu [%f] for final round.\n",totalPop,(double)(totalPop << 4)/totR);
+		
+		for (uint32_t i = 0; i < tot16; ++i) 
+			P[i] = IxArray[i] >= totR ? (Prince){0} : p[IxArray[i]];
+		uint32_t *ClusFPs = malloc((tot16 >> 4)*sizeof(*ClusFPs));
+		for (uint32_t i = 0; i < tot16; i+=16) {
+			Prince charming = P[i];
+			for (uint32_t j = 1; j < 16; ++j) 
+				charming = FP_combine(charming,P[i+j]);
+			ClusFPs[i >> 4] = FP_pop(&charming);
+		}
+		totalPop = 0;
+		for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
+		free(ClusFPs);
+		printf("Raw check: %llu [%f].\n",totalPop,(double)(totalPop << 4)/totR);
+		
+		totalPop = 0;
+		#pragma omp parallel for reduction(+:totalPop)
+		for (uint32_t i = 0; i < tot16; ++i) totalPop += FP_pop(P+i);
+		printf("Individual {DEBUG} score = %llu [%f]\n",totalPop,(double)totalPop/totR);
+		
+		}
+		//exit(1885);
+		// end of naive greedy clusterer
+		/* 
+		// Main cluster loop
+		
+		typedef struct {
+			Prince h1, h2;
+			uint32_t pop; //, pt;
+		} Clus; 
+		Clus *CX = malloc(tot16/2*sizeof(*CX));
+		for (uint32_t i = 1; i <= 4; ++i) {
+			uint64_t tally = 0;
+			uint32_t max = tot16 >> (i-1);
+			if (i < 1) {
+				tally = 0;
+				double wtime = omp_get_wtime();
+				for (uint32_t j = 0; j < max; j+=2) {
+					// our center will be j, and we will swap j+1 with whatever it matches best
+					uint32_t min = -1, mix = -1, dst = -1; 
+					#pragma omp parallel
+					{
+						uint32_t tix = -1, tmin = -1, tdst = -1;
+						#pragma omp for reduction(min:min)
+						for (uint32_t k = j+1; k < max; ++k) {
+							uint32_t t = FP_union(P[j],P[k]), td;
+							if (t < min) min = tmin = t, tix = k, tdst = FP_dist(P[j],P[k]);
+							else if (t == min && (td=FP_dist(P[j],P[k])) < tdst)
+								tix = k, tdst = td;
+						}
+						RI[omp_get_thread_num()] = tmin == min ? tix : -1;
+					}
+					uint32_t t;
+					//#pragma omp simd
+					for (uint32_t k = 0; k < THREADS; ++k)
+						if (RI[k] != -1 && ((t=FP_dist(P[j],P[RI[k]])) < dst || (t==dst && RI[k] < mix))) mix = RI[k];
+						//mix = RI[k] < mix ? RI[k] : mix;
+					Prince tp = P[j+1]; P[j+1] = P[mix]; P[mix] = tp;
+					//uint32_t x = IxArray[j+1]; IxArray[j+1] = IxArray[mix]; IxArray[mix] = x;
+					// vecswap 
+					uint32_t adj = (j+1) << (i-1), amp = 1 << (i-1), tmp;
+					mix <<= (i-1);
+					for (uint32_t z = 0; z < amp; ++z)
+						tmp = IxArray[adj + z],
+						IxArray[adj + z] = IxArray[mix + z],
+						IxArray[mix + z] = tmp;
+					tally += min; // we want to report this in the end
+				}
+				printf("Total with greedy = %llu [%f] (%f)\n",tally, (double)(tally << i)/totR,
+					omp_get_wtime() - wtime);
+			}
+			max = tot16 >> i;
+			for (uint32_t j = 0; j < max; ++j) {
+				CX[j].h1 = P[j*2], CX[j].h2 = P[j*2+1];
+				CX[j].pop = FP_union(CX[j].h1, CX[j].h2);
+				//CX[j].pt = j << i; // point to cluster's first ix in IxArray
+				ShfIx[j] = j;
+			}
+			
+			// monte carlo loop
+			uint32_t pass = 1, swaps = 0, freshswap = 0, dry = 0;
+			wtime = omp_get_wtime();
+			do {
+				swaps = 0; 
+				#pragma omp parallel for reduction(+:swaps)
+				for (uint32_t j = 0; j < max; j+=2) {
+					//swap ShfIx [j], [j+1]
+					uint32_t i1 = ShfIx[j], i2 = ShfIx[j+1];
+					uint32_t t1 = FP_union(CX[i1].h1, CX[i2].h2), 
+						t2 = FP_union(CX[i2].h1, CX[i1].h2);
+					if (t1 + t2 < CX[i1].pop + CX[i2].pop) {
+						++swaps;
+						CX[i1].pop = t1, CX[i2].pop = t2;
+						Prince tfp = CX[i1].h2; // swap cache
+						CX[i1].h2 = CX[i2].h2;  // fuse 2 into 1
+						CX[i2].h2 = tfp;        // fuse (old) 1 into 2
+						uint32_t tmp; 
+						i1 <<= i; i2 <<= i;
+						for (uint32_t z = 1 << (i-1); z < 1 << i; ++z)
+							tmp = IxArray[i1 + z],
+							IxArray[i1 + z] = IxArray[i2 + z],
+							IxArray[i2 + z] = tmp;
+					}
+				}
+				//if (!(pass & 255)) 
+				//	printf("\rIter %u, Pass %u, swapped: %llu\r",i,pass,swaps);
+				
+				// Slide to allow more swaps
+				#pragma omp parallel for simd
+				for (uint32_t z = 0; z < max; ++z) 
+					ShfIx[z] = ShfIx[z] + 1 >= max ? ShfIx[z] + 1 - max : ShfIx[z] + 1;
+				#define PRAD 0
+				if (!swaps) { 
+					if (freshswap && ++dry > 100000 << (i-1)) break; // no change since last time
+					if (doRand) {
+						#pragma omp parallel
+						{
+							uint64_t seed = omp_get_thread_num() + 1 + mseed;
+							#pragma omp for
+							for (uint32_t z = 0; z < max-1; ++z) {
+								//Cache[z] = QRand64(&seed) % (max - z) + z; //> 200000 ? 200000 : max-z)) + z;
+								uint32_t r = QRand64(&seed);
+								r = r % (max-z) + z; //(uint64_t)r * (max - z) / (uint32_t)-1 + z; // / (max - z);
+								Cache[z] = r;
+								//uint32_t old; 
+								//old = ShfIx[z];
+								//#pragma omp atomic capture
+								//{old = ShfIx[z]; ShfIx[z] = ShfIx[r];}
+								//#pragma omp atomic capture
+								//{ShfIx[z] = ShfIx[r]; ShfIx[r] = old;}
+							}
+							#pragma omp single
+							mseed = seed;
+						}
+						for (uint32_t z = 0; z < max - 1; ++z) {
+							register uint32_t t = ShfIx[z], r = Cache[z]; 
+							ShfIx[z] = ShfIx[r], ShfIx[r] = t;
+						}
+					} else {
+						for (uint32_t z = 0; z < max; ++z)
+							Cache[z]=ShfIx[2*z >= max ? 2*z - max + 1 : 2*z];
+						uint32_t *t = Cache; Cache = ShfIx; ShfIx = t;
+					}
+					freshswap = 1;
+				} else freshswap = 0;
+			} while (pass++ < 100000 << (i-1));
+			tally = 0;
+			#pragma omp parallel for reduction(+:tally)
+			for (uint32_t i = 0; i < max; ++i) tally += CX[i].pop;
+			//printf("Total pop (iter %u, pass %u): %llu [av %f]\n",i, pass, totalPop,(double)totalPop/(tot16 >> i));
+			printf("[Iter %u; pass %u] Total = %llu [%f] (%f)\n",i, pass, tally, (double)(tally << i)/totR,
+					omp_get_wtime() - wtime);
+			
+			// prepare next loop vars
+			if (i == 4) break;
+			
+			max = tot16 >> (i+1);
+			for (uint32_t j = 0; j < max; ++j) {
+				CX[j].h1 = FP_combine(CX[j*2].h1,CX[j*2].h2);
+				CX[j].h2 = FP_combine(CX[j*2+1].h1,CX[j*2+1].h2);
+				P[j*2] = CX[j].h1;
+				P[j*2+1] = CX[j].h2;
+				CX[j].pop = FP_union(CX[j].h1, CX[j].h2);
+				ShfIx[j] = j;
+			}
+			//break;
+		}
+		free(CX); CX = 0; 
+		totalPop = 0;
+		#pragma omp parallel for reduction(+:totalPop)
+		for (uint32_t i = 0; i < tot16; ++i) totalPop += IxArray[i] >= totR ? 0 : FP_pop(p+IxArray[i]);
+		printf("Total pop (completion): %llu [av %f]\n",totalPop,(double)totalPop/totR);
+		*/
+		
+		// Assuming clusters are placed relatively neatly in order, 
+		// Pick a random element (from any cluster) and swap with a random element (from any other cluster)
+		// If combined score of the two clusters increases, keep swap. Repeat until convergence.
+		
+		//for (uint32_t i = 0; i < tot16; ++i) P[i] = IxArray[i] >= totR ? (Prince){0} : p[IxArray[i]];
+		if (sig_thres) {
+			uint32_t *ClusFPs = malloc((tot16 >> 4)*sizeof(*ClusFPs));
+			
+			for (uint32_t i = 0; i < tot16; ++i) 
+				P[i] = IxArray[i] >= totR ? (Prince){0} : p[IxArray[i]];
+			for (uint32_t i = 0; i < tot16; i+=16) {
+				Prince charming = P[i];
+				for (uint32_t j = 1; j < 16; ++j) 
+					charming = FP_combine(charming,P[i+j]);
+				ClusFPs[i >> 4] = FP_pop(&charming);
+			}
+			totalPop = 0;
+			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
+			printf("Raw check: %llu [%f].\n",totalPop,(double)(totalPop << 4)/totR);
+		
+			#pragma omp parallel for 
+			for (uint32_t i = 0; i < tot16 >> 4; ++i) ClusFPs[i] = FP_pop(PC+i);
+			
+			/* for (uint32_t i = 0; i < tot16; i+=16) {
+				Prince charming = P[i];
+				for (uint32_t j = 1; j < 16; ++j) 
+					charming = FP_combine(charming,P[i+j]);
+				ClusFPs[i >> 4] = FP_pop(&charming);
 			} */
-
-			Prince centroid = FP_combine(p[c1],p[c2]); // and now its pop is in "cost"
-			ClusIX[c_ix++] = c1;
-			ClusIX[c_ix++] = c2;
-			X[c1].ix = X[c2].ix = 0; // We have deaddened these refs. (Will we need to go through them again?)
+			totalPop = 0;
+			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
+			printf("Starting at %llu [%f] for final round.\n",totalPop,(double)(totalPop << 4)/totR);
 			
-			// Search band around center of c1, c2
-			//uint64_t ctr = ((uint64_t)c1 + c2) << 1; 
+			#pragma omp parallel for
+			for (uint32_t i = 0; i < tot16; ++i) ShfIx[i] = i;
 			
-			// Search half a band less than lo and half a band more than hi?
-			uint32_t lo, hi;
-			if (c2 > c1) lo = c2, hi = c1;
-			else lo = c1, hi = c2;
-			uint32_t min, mix, start, end;
-			start = lo > BANDED_FP/2 ? lo - BANDED_FP/2 : 0;
-			end = hi + BANDED_FP/2 < totR ? hi + BANDED_FP/2 : totR;
-			
-			//if (c2 > BANDED_FP) start = c2 - BANDED_FP,	end = c2; 
-			//else start = 0,	end = MIN(totR, BANDED_FP); // Should we end our range at the greater c of c1,c2?
-			for (int z = 0; z < (VECSZ-2); ++z) {
-				min = 257; //, mix = -1
-
-				// The old technique minimized a triple-tiebreak objective to select a new member:
-				// 1) Minimum score; of the ties:
-				// 2) Minimum connectivity (to prioritize selecting refs with fewer options); of the ties:
-				// 3) Minimum xor distance
-				// The new method will start similiar but maybe worth going simpler: any minimum score?
-				// Another alternative would be to actually weight by all 3 and take the true min afterward.
-				// Update: connectivity criterion eliminated.
-
+			uint32_t tot2 = (tot16 >> 4) - ((tot16 >> 4) & 1);
+			wtime = omp_get_wtime();
+			for (uint32_t i = 0; i < sig_thres; ++i) {
 				#pragma omp parallel
 				{
-					uint32_t mp = -1, mi, bp = -1;
-					#pragma omp for reduction(min:min)
-					for (uint32_t j = start; j < end; ++j) if (X[j].ix) { //if (Connectivity[j]) { 
-						uint32_t t = FP_union(centroid, p[j]), tp;
-						if (t < min) min = mp = t, mi = j, bp = FP_dist(p[j],centroid);
-						//else if (t == min && X[j].ix < X[mi].ix) 
-						//	mi = j, bp = FP_dist(p[j],centroid);
-						else if (t == min /*&& X[j].ix == X[mi].ix*/ && (tp=FP_dist(p[j],centroid)) < bp)
-							mi = j, bp = tp;
+					uint64_t seed = omp_get_thread_num() + 1 + mseed;
+					#pragma omp for
+					for (uint32_t z = 0; z < (tot16 >> 4)-1; ++z) {
+						uint32_t r = QRand64(&seed);
+						Cache[z] = r % ((tot16 >> 4)-z) + z; 
 					}
-					IXBIN[omp_get_thread_num()] = mp == min ? mi : -1; // reduction holster
+					#pragma omp single
+					{
+						mseed = seed;
+						for (uint32_t z = 0; z < (tot16 >> 4); ++z) {
+							register uint32_t t = ShfIx[z], r = Cache[z]; 
+							ShfIx[z] = ShfIx[r], ShfIx[r] = t;
+						}
+					}
+					#pragma omp for schedule(dynamic,1)
+					for (uint32_t j = 0; j < tot2; j+=2) {
+						uint32_t c1 = ShfIx[j], c2 = ShfIx[j+1], 
+							c1o = c1 << 4, c2o = c2 << 4;
+						// Exhaustive 256-way swap
+						uint32_t r1 = MIN(totR,c1o+16),
+							r2 = MIN(totR,c2o+16);
+						for (uint32_t k = c1o; k < r1; ++k) {
+							for (uint32_t m = c2o; m < r2; ++m) {
+								Prince tp = P[k]; P[k] = P[m]; P[m] = tp;
+								Split re = FP_union16x2(P+c1o, P+c2o);
+								if (re.v + re.i < ClusFPs[c1] + ClusFPs[c2]) { 
+									ClusFPs[c1] = re.v, ClusFPs[c2] = re.i;
+									uint32_t t = IxArray[k]; IxArray[k] = IxArray[m]; IxArray[m] = t;
+								} else P[m] = P[k], P[k] = tp; // swap back!
+							}
+						}
+					}
 				}
-				uint32_t bestC = -1, bestP = -1, t;
-				for (int j = 0; j < THREADS; ++j) {
-					if (IXBIN[j] != -1) {
-						//if (X[IXBIN[j]].ix < bestC) //(t=FP_dist(p[IXBIN[j]],centroid)) < bestP)  
-						//	mix = IXBIN[j], bestC = X[mix].ix, bestP = FP_dist(p[IXBIN[j]],centroid); 
-						//else 
-							if (/* X[IXBIN[j]].ix == bestC && */ (t=FP_dist(p[IXBIN[j]],centroid)) < bestP) 
-								mix = IXBIN[j], bestP = t; 
-						else if (/*X[IXBIN[j]].ix == bestC && */ FP_dist(p[IXBIN[j]],centroid) == bestP && IXBIN[j] < mix)
-							mix = IXBIN[j]; 
-					}
+				if (!(i & 511)) {
+					uint64_t sv = 0;
+					#pragma omp parallel for simd reduction(+:sv)
+					for (uint32_t i = 0; i < tot16>>4; ++i) sv += ClusFPs[i];
+					printf("[Round %u] savings = %llu, cur = %llu\n",i,totalPop-sv,sv);
+					totalPop = sv;
 				}
-				if (min > 256) { // Emergency expansion of radius for incomplete clusters -- backwards first
-					++emEx;
-					uint32_t j = start; 
-					if (j--) do if (X[j].ix) { // pick the first eligible bachelor
-						centroid = FP_combine(centroid, p[j]);
-						ClusIX[c_ix++] = j;
-						X[j].ix = 0;
-						if (++z == VECSZ-2) break;
-					} while (j--);
-					if (j==-1) for (j = end+1; j < totR; ++j) if (X[j].ix) {
-						centroid = FP_combine(centroid, p[j]);
-						ClusIX[c_ix++] = j;
-						X[j].ix = 0;
-						if (++z == VECSZ-2) break;
-					}
-					if (z != VECSZ-2) {
-						printf("\nCluster pool depleted"); 
-						goto FP_ENDGAME; 
-					}
-					min = FP_pop(&centroid); 
-					continue;
-				}
-				centroid = FP_combine(centroid, p[mix]);
-				ClusIX[c_ix++] = mix;
-				X[mix].ix = 0;
 			}
-			UnionPrince[fp_ix++] = centroid;
-			totalPop += min;
-			printf("\r[%f]: Finalizing cluster %u", (double)totalPop/fp_ix, fp_ix);
+			totalPop = 0;
+			#pragma omp parallel for reduction(+:totalPop)
+			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
+			printf("Finished at %llu [%f] for final round [%f].\n",totalPop,(double)(totalPop << 4)/totR,omp_get_wtime()-wtime);
+			
+			//totalPop = 0;
+			//for (uint32_t i = 0; i < totR; ++i) totalPop += FP_pop(p+IxArray[i]);
+			//printf("DEBUG: memberwise bounded pop = %llu [%f]\n",totalPop, (double)(totalPop)/totR);
+			
+			
+			/*for (uint32_t i = 0; i < tot16; ++i) 
+				P[i] = IxArray[i] >= totR ? (Prince){0} : p[IxArray[i]];
+			for (uint32_t i = 0; i < tot16; i+=16) {
+				Prince charming = P[i];
+				for (uint32_t j = 1; j < 16; ++j) 
+					charming = FP_combine(charming,P[i+j]);
+				ClusFPs[i >> 4] = FP_pop(&charming);
+			}
+			totalPop = 0;
+			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
+			printf("Raw check: %llu [%f].\n",totalPop,(double)(totalPop << 4)/totR);*/
+			
+			free(ClusFPs);
 		}
-		/////////////////
+		uint32_t *ClusIX = IxArray; // reassign!
+		Prince *UnionPrince = PC;   // reassign!
+		free(P_init); 
+		free(ShfIx); free(Cache);
+		
 
-		FP_ENDGAME:NULL;
-		printf("\nTime to cluster: %f\n",omp_get_wtime()-wtime);
-		printf("\nDone. Reads safely tucked into clusters: %u\n",c_ix);
-		printf("Considering all clusters: %f\n",(double)(totalPop+256*(totRC-fp_ix))/totRC);
-		printf("Emergency expansion proportion: %f\n",(double)emEx/totRC);
-
-		// Find refs that weren't clustered and add them randomly
-		if (c_ix < totR) for (uint32_t i = 0; i < totR; ++i) if (X[i].ix) ClusIX[c_ix++] = i;
-		Prince badP; badP.w[0] = -1, badP.w[1] = -1, badP.w[2] = -1, badP.w[3] = -1;
-		for (uint32_t i = fp_ix; i < totRC; ++i) UnionPrince[i] = badP;
-		totalPop = 0;
-		for (uint32_t i = 0; i < totRC; ++i) totalPop += FP_pop(UnionPrince + i);
-
-		printf("Added remainder to the bin. Total avg: %f\n",(double)totalPop/totRC);
-		//for (uint32_t i = 0; i < totR; ++i) free(CC[i]);
-		//free(CC);
-		//free(Connectivity); // reuse Connectivity for new RefIxSrt, free old RefIxSrt
-		//free(SrtIx_cent);
-		for (uint32_t i = 0; i < totR; ++i) free(X[i].Neibs);
-		free(X);
-		free(SrtIx);
+		// New heirarchical clusterer: faster, more ram-friendly 
+		// ... removed 
+		
 		//#pragma omp sections
 		{
 			//#pragma omp section
@@ -1999,7 +2173,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				if (!NewOrig) {fputs("OOM:NewOrig\n",stderr); exit(3);}
 				uint32_t j = 0; for (uint32_t i = 0; i < totR; ++i) {
 					NewDedup[i] = j;
-					//printf("clusIX[%u] = %u\n",i, ClusIX[i]);
 					for (uint32_t z = RefDedupIx[ClusIX[i]]; z < RefDedupIx[ClusIX[i]+1]; ++z)
 						NewOrig[j++] = TmpRIX[z];
 				}
@@ -2538,7 +2711,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 			if (len < SCOUR_N || Sb.ed >= len/SCOUR_N) QStat[i] = 2;
 		
 			else for (uint32_t j = 0; j < len; ++j) {
-				if ((totN += s[j] > 4) > 4) {QStat[i] = 2; break;}
+				if ((totN += s[j] > 4 + Z) > 4) {QStat[i] = 2; break;} // New! +Z 'cuz N not abig'
 				else if (totN) QStat[i] = 0;
 				//if (s[j] > 4) {
 				//		QStat[i] = 0; // set as ambig-containing
@@ -2822,19 +2995,13 @@ void addAmbigScour(Accelerant *F, uint32_t r, char *S, uint32_t w, uint8_t ix) {
 	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
 		addAmbigScour(F, r, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
 }
-/*void addAmbigScourZ(Split **A, Split **F, uint64_t *i, uint64_t *max, uint32_t r, char *S, uint32_t w, uint8_t ix) {
-	if (ix == SCOUR_N) {
-		if (*i == *max) *F = realloc(*F,(*max*=1.2)*sizeof(**F));
-			//F[w].Refs = realloc(F[w].Refs,(F[w].cap+=F[w].cap+1)*sizeof(*F[w].Refs));
-		if (!A[w]) A[w] = F[(*i)++], *A[w] = (Split){r,0}; //(!F[w].len || F[w].Refs[F[w].len-1] != r) F[w].Refs[F[w].len++] = r;
-		else if (A[w]->v != r) {
-			Split *t = F[(*i)++];
-			*t = (Split){r,A[w]-*F}
-		}
-	}
+void countAmbigScour(uint8_t *C, uint32_t *W, uint32_t *I, char *S, uint32_t w, uint8_t ix) {
+	if (ix == SCOUR_N) { if (!(C[w >> 3] & (1 << (w & 7)))) 
+		W[(*I)++] = w, C[w >> 3] |= (1 << (w & 7)); }
 	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
-		addAmbigScourZ(F, r, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
-}*/
+		countAmbigScour(C, W, I, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
+}
+
 void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	FILE *out = fopen(xcel_FN,"wb");
 	if (!out) {fprintf(stderr, "Cannot write accelerator '%s'\n",xcel_FN); exit(1);}
@@ -2842,45 +3009,41 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	uint32_t *RefIxSrt = Rd->RefIxSrt, *RefLen = Rd->RefLen, totR = Rd->totR,
 		totRC = Rd->numRclumps;
 	if (Z) fprintf(stderr,"WARNING: N-penalized accelerator not usable for unpenalized alignment\n");
-	THREADS = THREADS >> 3 ?: 1; //1; //THREADS > 4 ? 4 : THREADS;
-	Accelerant **G = malloc(THREADS*sizeof(*G));
-	uint32_t **B = malloc(THREADS*sizeof(*B)); 
-	uint64_t *B_I = malloc(THREADS*sizeof(*B_I));
+	
+	//THREADS = THREADS >> 1 ?: 1; //1; //THREADS > 4 ? 4 : THREADS;
+	uint32_t *Bad = 0;
 	double wtime = omp_get_wtime();
-	uint32_t done = 0;
+	uint32_t done = 0, badSz = 0;
+
+	Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
+	if (!F) {fputs("OOM:AccelerantF\n",stderr); exit(3);}
+	#define AMLIM 6
+	
 	#pragma omp parallel num_threads(THREADS)
 	{
 		int tid = omp_get_thread_num();
-		Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
-		uint64_t badSz = 1000, bad_ix = 0;
-		uint32_t *Bad = malloc(badSz*sizeof(*Bad));
-		
-		#pragma omp for schedule(static,1)
+		uint8_t *WordsYN = calloc((1 << (2*SCOUR_N)) >> 3,sizeof(*WordsYN)); // 128MB
+		uint32_t *WordCache = malloc((Rd->maxLenR*(1<<(2*AMLIM)))*16*sizeof(*WordCache)); 
+		if (!WordsYN || !WordCache) {fputs("OOM:WordsYN\n",stderr); exit(3);}
+
+		const uint32_t AMBIG = 4 + Z, RNG = SCOUR_N-1;
+		#pragma omp for schedule(static,1) reduction(+:badSz)
 		for (uint32_t i = 0; i < totRC; ++i) {
-			printf("\rGenerating accelerator [%u / %u]\r",done,totRC);
-			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ); 
+			if (!(done & 255)) printf("\rScanning accelerator [%u / %u]\r",done,totRC);
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
 			uint16_t doAmbig = 0;
-
 			for (uint32_t z = begin; z < end; ++z) { // specific sequence
-				char *s = RefSeq[RefIxSrt[z]]; 
-				uint32_t len = RefLen[RefIxSrt[z]], rowN = 0;
+				uint32_t len = RefLen[RefIxSrt[z]]; 
 				if (len < SCOUR_N) continue;
-				for (uint32_t j = 0; j < len; ++j) if (s[j] > 4 + Z) {
-					if (s[j]==5) { // detect N's
-						if (++rowN > SCOUR_L) {
-							if (bad_ix >= badSz) {
-								Bad = realloc(Bad, (badSz*=1.2)*sizeof(*Bad));
-								if (!Bad) {fputs("OOM:Bad[acc]2\n",stderr); exit(3);}
-							}
-							Bad[bad_ix++] = i;
-							goto MULTI_ACC_END;
-						}
-					}
-					else rowN = 0;
-					doAmbig |= 1 << (z-begin); // per-sequence control
-				} else rowN = 0;
+				char *s = RefSeq[RefIxSrt[z]]; 
+				uint32_t Asum = 0;
+				for (int j = 0; j < len; ++j) {
+					if (j >= RNG && s[j-RNG] > AMBIG) --Asum;
+					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
+					if (Asum > AMLIM) {++badSz; goto MULTI_ACC_END;}
+				}
 			}
-
+			uint32_t I = 0;
 			for (uint32_t z = begin; z < end; ++z) { 
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t len = RefLen[RefIxSrt[z]];
@@ -2890,12 +3053,11 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 						uint32_t k = 0; 
 						for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
 						if (k < SCOUR_N) { j+= k; continue; }
-						addAmbigScour(F, i, s + j, 0, 0);
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
 					}
-				}
-				else if (doAmbig << (16-(z-begin)) >> (z-begin)) 
+				} else if (doAmbig << (16-(z-begin)) >> (z-begin)) 
 					for (uint32_t j = 0; j + SCOUR_N <= len; ++j)
-						addAmbigScour(F, i, s + j, 0, 0);
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
 				else {
 					uint32_t w = 0;
 					for (uint32_t j = 0; j + 1 < SCOUR_N; ++j)
@@ -2903,46 +3065,114 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 					for (uint32_t j = SCOUR_N - 1; j < len; ++j) {
 						w <<= 2, w |= s[j]-1;
 						uint32_t t = (w << SCOUR_R) >> SCOUR_R;
-						if (F[t].len == F[t].cap) 
-							F[t].Refs = realloc(F[t].Refs,(F[t].cap+=(F[t].cap>>3)+1)*sizeof(*F[t].Refs));
-						if (!F[t].len || F[t].Refs[F[t].len-1] != i) F[t].Refs[F[t].len++] = i;
+						if (!(WordsYN[t >> 3] & (1 << (t & 7)))) 
+							WordCache[I++] = t, WordsYN[t >> 3] |= (1 << (t & 7));
 					}
 				}
 			}
-
+			//printf("%u\t%u\n",i,I); // Clump i had I unique accelerants
+			for (; I; --I) {
+				#pragma omp atomic
+				++F[WordCache[I-1]].cap; 
+				WordsYN[WordCache[I-1] >> 3] = 0;
+			}
 			MULTI_ACC_END:NULL;
 			#pragma omp atomic
 			++done;
 		}
-		G[tid] = F, B[tid] = Bad, B_I[tid] = bad_ix;
+		#pragma omp single
+		{ // create data structures of the perfect size for bads and words
+			printf("Finished scanning pass [%f].\n",omp_get_wtime() - wtime);
+			for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) if (F[i].cap) {
+				F[i].Refs = malloc(F[i].cap*sizeof(*F[i].Refs));
+				if (!F[i].Refs) {fputs("OOM:Accelerant.Refs\n",stderr); exit(3);}
+			}
+			printf("Number bad (initial) = %u\n",badSz);
+			Bad = malloc(badSz*sizeof(*Bad)); 
+			if (!Bad) {fputs("OOM:Bad\n",stderr); exit(3);}
+			badSz = 0; // use as ix
+			done = 0;
+			wtime = omp_get_wtime();
+		}
+		#pragma omp for schedule(static,1)
+		for (uint32_t i = 0; i < totRC; ++i) {
+			if (!(done & 255)) printf("\rFilling accelerator [%u / %u]\r",done,totRC);
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
+			uint16_t doAmbig = 0;
+			for (uint32_t z = begin; z < end; ++z) { // specific sequence
+				uint32_t len = RefLen[RefIxSrt[z]]; 
+				if (len < SCOUR_N) continue;
+				char *s = RefSeq[RefIxSrt[z]]; 
+				uint32_t Asum = 0;
+				for (int j = 0; j < len; ++j) {
+					if (j >= RNG && s[j-RNG] > AMBIG) --Asum;
+					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
+					if (Asum > AMLIM) {
+						uint32_t bix;
+						#pragma omp atomic capture
+						bix = badSz++;
+						Bad[bix] = i; 
+						goto MULTI_ACC_END2;
+					}
+				}
+			}
+			uint32_t I = 0;
+			for (uint32_t z = begin; z < end; ++z) { 
+				char *s = RefSeq[RefIxSrt[z]]; 
+				uint32_t len = RefLen[RefIxSrt[z]];
+				if (len < SCOUR_N) continue;
+				if (Z) { // screen for N's first!
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
+						uint32_t k = 0; 
+						for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
+						if (k < SCOUR_N) { j+= k; continue; }
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
+					}
+				} else if (doAmbig << (16-(z-begin)) >> (z-begin)) 
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j)
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
+				else {
+					uint32_t w = 0;
+					for (uint32_t j = 0; j + 1 < SCOUR_N; ++j)
+						w <<= 2, w |= s[j]-1;
+					for (uint32_t j = SCOUR_N - 1; j < len; ++j) {
+						w <<= 2, w |= s[j]-1;
+						uint32_t t = (w << SCOUR_R) >> SCOUR_R;
+						if (!(WordsYN[t >> 3] & (1 << (t & 7)))) 
+							WordCache[I++] = t, WordsYN[t >> 3] |= (1 << (t & 7));
+					}
+				}
+			}
+			//printf("%u\t%u\n",i,I); // Clump i had I unique accelerants
+			for (; I; --I) {
+				uint32_t wix;
+				#pragma omp atomic capture
+				wix = F[WordCache[I-1]].len++;
+				F[WordCache[I-1]].Refs[wix] = i;
+				WordsYN[WordCache[I-1] >> 3] = 0;
+			}
+			
+			MULTI_ACC_END2:NULL;
+			#pragma omp atomic
+			++done;
+		}
+		free(WordsYN); free(WordCache);
 	}
-
-	printf("Done calculating accelerator (%f s)\n",
-		omp_get_wtime()-wtime);
+	printf("\nDone scanning [%f]; writing...\n",omp_get_wtime() - wtime);
 	wtime = omp_get_wtime();
-	size_t totalWords = 0; uint32_t totalBad = 0;
-	#pragma omp parallel for reduction(+:totalWords,totalBad)
-	for (uint32_t z = 0; z < THREADS; ++z) {
-		Accelerant *F = G[z];
-		for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-			totalWords += F[i].len;
-		totalBad += B_I[z];
-	}
-	printf("Total accelerants stored: %llu (%u bad)\n",totalWords, totalBad);
+		
+	size_t totalWords = 0;
+	#pragma omp parallel for reduction(+:totalWords)
+	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) totalWords += F[i].len;
+	printf("Total accelerants stored: %llu (%u bad)\n",totalWords, badSz);
 	uint8_t vers = (1 << 7) | (Z << 6) | SCOUR_N;
 	fwrite(&vers,sizeof(vers),1,out);
-	fwrite(&totalBad, sizeof(totalBad), 1, out);
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) {
-		uint32_t len = 0;
-		//#pragma omp parallel for reduction(+:len) num_threads(THREADS) schedule(static,1)
-		for (uint32_t z = 0; z < THREADS; ++z) len += G[z][i].len;
-		fwrite(&len, sizeof(len), 1, out);
-	}
+	fwrite(&badSz, sizeof(badSz), 1, out);
 	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-		for (uint32_t z = 0; z < THREADS; ++z) if (G[z][i].len) 
-			fwrite(G[z][i].Refs, sizeof(*G[z][i].Refs), G[z][i].len, out);
-	for (uint32_t z = 0; z < THREADS; ++z)
-		fwrite(B[z], sizeof(*B[z]), B_I[z], out);
+		fwrite(&F[i].len, sizeof(F[i].len), 1, out);
+	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
+		fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
+	fwrite(Bad, sizeof(*Bad), badSz, out);
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
 	//for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) free(F[i].Refs);
 	//free(F), free(Bad);
