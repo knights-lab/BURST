@@ -143,7 +143,7 @@ Uh oh, looks like your database contains long series of "N"s (ambiguous bases). 
 3. *I get "segmentation fault" (or other crash):*
 This is likely a bug with BURST! Please contact me with no less than the following and I'll try to fix it:
   - The exact command-line used to run the program
-  - The version of emalmer used (run with -h to see help)
+  - The version of BURST used (run with -h to see help)
   - The operating system and amount of RAM (memory) in the computer running it
   - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce the DB. 
 
