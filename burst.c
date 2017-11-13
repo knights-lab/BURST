@@ -2,7 +2,7 @@
 Copyright (C) 2015-2017 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.5a"
+#define VER "v0.99.6"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -52,6 +52,7 @@ This software is released under the GNU Affero General Public License (AGPL) v3.
 			_mm_or_si128(_mm_andnot_si128(mask, x), _mm_and_si128(mask, y))
 		#define _mm_min_epu16(x,y) \
 			_mm_blendv_si128(y, x, _mm_cmple_epu16(x, y))
+		#define _mm_lddqu_si128 _mm_loadu_si128
 	#endif
 #endif
 #define PADDING 0
@@ -61,7 +62,7 @@ This software is released under the GNU Affero General Public License (AGPL) v3.
 
 typedef enum {
 	FORAGE, BEST, ALLPATHS, CAPITALIST, ANY,
-	MATRIX, PAIRED, MAPPED, INLINE
+	MATRIX, PAIRED, MAPPED, INLINE, COMMUNIST
 } Mode;
 typedef enum {DNA_16, DNA_8, DNA_4, PROT, DATA, QUICK} DBType;
 typedef enum {NONE = 0, REORDER = 1, FAST = 2, FULL = 3, AUTO = 4} Prepass_t;
@@ -106,7 +107,9 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	puts("  BEST (report first best match by hybrid BLAST id)"); \
 	puts("  ALLPATHS (report all ties with same error profile)"); \
 	puts("  CAPITALIST (minimize set of references AND interpolate taxonomy) [default]"); \
-	puts("  FORAGE (report all matches above specified threshold"); \
+	puts("  COMMUNIST (min. ref. set, taxa interpolation, and fair redistribution)"); \
+	puts("  FORAGE (report all matches above specified threshold)"); \
+	puts("  ANY (report any valid hit above specified threshold)"); \
 	/*puts("  [not enabled]: PAIRED, MAPPED, INLINE");*/ \
 	puts("--makedb (-d) [name qLen]: Create a database from input references");\
 	printf("  [name]: Optional. Can be DNA, RNA, or QUICK [QUICK]\n");\
@@ -269,7 +272,7 @@ typedef struct {
 	uint32_t *BadList, badListSz;
 	void **Accelerators;
 	DBType dbType;
-	int cparts;
+	int cparts, skipAmbig;
 } Reference_Data;
 
 typedef struct {
@@ -360,51 +363,6 @@ static inline void parallel_sort_tuxedo(Tuxedo *Pack, uint32_t len) {
 	PARALLEL_SORT_PROTOTYPE(Tuxedo, seq, 5, NIB5)
 	#undef qsort
 }
-
-/* static inline void parallel_sort_tuxedo(Tuxedo *Pack, uint32_t len) {
-	//PARALLEL_SORT_PROTOTYPE(Tuxedo, seq, 5, NIB5)
-		static const uint32_t NLB = 1 << (5*4); 
-	Tuxedo **Bins = calloc(NLB,sizeof(*Bins)); 
-	uint32_t *BcountO = calloc(1+NLB,sizeof(*BcountO)), 
-		*Bcount = BcountO + 1; 
-	#pragma omp parallel for
-	for (uint32_t i = 0; i < len; ++i) { 
-		char *s = Pack[i].seq; 
-		uint32_t nib = s[0] << 16 | s[1] << 12 | s[2] << 8 | s[3] << 4 | s[4]; 
-		if (nib >= NLB) {printf("Uh oh. nib [%u] >= NLB [%u]\n",nib,NLB); exit(5);}
-		#pragma omp atomic update
-		++Bcount[nib]; 
-	} 
-	for (uint32_t i = 0; i < NLB; ++i) if (Bcount[i]) 
-		Bins[i] = malloc(Bcount[i]*sizeof(*Bins[i])), 
-		Bcount[i] = 0;
-	#pragma omp parallel for
-	for (uint32_t i = 0; i < len; ++i) { 
-		char *s = Pack[i].seq; 
-		uint32_t nib = s[0] << 16 | s[1] << 12 | s[2] << 8 | s[3] << 4 | s[4]; 
-		uint32_t ix; 
-		#pragma omp atomic capture
-		ix = Bcount[nib]++; 
-		Bins[nib][ix] = Pack[i]; 
-	} 
-	int cmpFunc(const void *a, const void *b) { 
-		return strcmp(((Tuxedo *)a)->seq + 5, 
-		((Tuxedo *)b)->seq + 5); 
-	} 
-	#pragma omp parallel for schedule(dynamic,1)
-	for (uint32_t i = 0; i < NLB; ++i) if (Bins[i]) 
-		qsort(Bins[i],Bcount[i],sizeof(*Bins[i]),cmpFunc); 
-	--Bcount; 
-	for (uint32_t i = 2; i <= NLB; ++i) Bcount[i] += Bcount[i-1]; 
-	#pragma omp parallel for schedule(dynamic,1)
-	for (uint32_t i = 0; i < NLB; ++i) { 
-		uint32_t init = Bcount[i], ed = Bcount[i+1]; 
-		for (uint32_t pt = init; pt < ed; ++pt) 
-			Pack[pt] = Bins[i][pt - init]; 
-		free(Bins[i]); 
-	} 
-	free(Bins), free(BcountO); 
-} */
 
 // Taxonomy handling
 char NULLTAX[1] = {0};
@@ -1153,7 +1111,118 @@ inline uint32_t aded_mat16(DualCoil *ref, char *query, uint32_t rwidth, uint32_t
 inline uint32_t aded_xalpha(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, DualCoil *Matrix,
  DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) 
  ADED_PROTOTYPE(DIAGSC_XALPHA)
-
+inline uint32_t aded_mat16L(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, uint32_t minlen, 
+ DualCoil *Matrix, DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) {
+	if (startQ > *LoBound || minlen > rwidth + maxED) return -1; /* truncation signal */ 
+	uint32_t y, x; 
+	__m128i maxEDv = _mm_set1_epi8(maxED+1); /* < 255 ? maxED+1 : 255); /* BAD if score >= maxED+1 */ 
+	--query; --ref; ++qlen; 
+	maxED = maxED < qlen ? maxED : qlen; 
+	if (startQ == 1) LoBound[1] = 1, HiBound[1] = rwidth + maxED - minlen;
+	
+	DualCoil *restrict cur = Matrix + startQ * width, *restrict prev = cur - width; 
+	for (y = startQ; y <= maxED; ++y) { 
+		char qLet = query[y]; 
+		_mm_store_si128((void*)(cur),_mm_set1_epi8(MIN(y,255))); /* column 0 */ 
+		for (x = 1; x < HiBound[y]; ++x) { 
+			__m128i rChunk = _mm_load_si128((void*)(ref+x)); /* refRow += 16; */ 
+			__m128i prevRow_x = _mm_load_si128((void*)(prev+x)); 
+			__m128i prevRow_x_1 = _mm_load_si128((void*)(prev+(x-1))); 
+			__m128i curRow_x_1 = _mm_load_si128((void*)(cur+(x-1))); 
+			
+			__m128i diagSc = DIAGSC_MAT16; 
+			__m128i score = _mm_adds_epu8(prevRow_x_1, diagSc); 
+			__m128i scoreU = _mm_adds_epu8(prevRow_x, _mm_set1_epi8(GAP)); 
+			score = _mm_min_epu8(scoreU,score); 
+			__m128i scoreL = _mm_adds_epu8(curRow_x_1,_mm_set1_epi8(GAP)); 
+			score = _mm_min_epu8(scoreL,score); 
+			
+			_mm_store_si128((void*)(cur+x),score); 
+		} 
+		LoBound[y+1] = 1; 
+		HiBound[y+1] = HiBound[y] + (HiBound[y] < rwidth); 
+		_mm_store_si128((void*)(cur+HiBound[y]),_mm_set1_epi8(-1)); /* kill the right block */ 
+		DualCoil *temp = cur; 
+		cur = (y <= cacheSz) ? cur + width : prev; 
+		prev = (y <= cacheSz) ? prev + width : temp; 
+	} 
+	for (; y < qlen; ++y) { 
+		LoBound[y+1] = 0; 
+		char qLet = query[y]; 
+		/*printf("---Entering LIM loop: y = %u [let %u] / maxED = %u, LoBound[y]=%u, LoBound[y+1]=%u,HiBound[y]=%u,HiBound[y+1]=%u...", 
+			y,qLet,maxED, LoBound[y], LoBound[y+1], HiBound[y], HiBound[y+1]);*/ 
+		_mm_store_si128((void*)(cur),_mm_set1_epi8(MIN(y,255))); 
+		for (x = LoBound[y]; x < HiBound[y]; ++x) { 
+			__m128i rChunk = _mm_load_si128((void*)(ref+x)); 
+			__m128i prevRow_x = _mm_load_si128((void*)(prev+x)); 
+			__m128i prevRow_x_1 = _mm_load_si128((void*)(prev+(x-1))); 
+			__m128i curRow_x_1 = _mm_load_si128((void*)(cur+(x-1))); 
+			
+			__m128i diagSc = DIAGSC_MAT16; 
+			__m128i score = _mm_adds_epu8(prevRow_x_1, diagSc); 
+			__m128i scoreU = _mm_adds_epu8(prevRow_x, _mm_set1_epi8(GAP)); 
+			score = _mm_min_epu8(scoreU,score); 
+			__m128i scoreL = _mm_adds_epu8(curRow_x_1,_mm_set1_epi8(GAP)); 
+			score = _mm_min_epu8(scoreL,score); 
+			
+			/* Do bounds handling */ 
+			__m128i anyBad = _mm_cmpeq_epi8(maxEDv,_mm_min_epu8(maxEDv,score)); 
+			score = _mm_or_si128(anyBad,score); 
+			if (_mm_movemask_epi8(anyBad) != 0xFFFF) { 
+				if (!LoBound[y+1]) LoBound[y+1] = x; 
+				HiBound[y+1] = x; 
+			} 
+			_mm_store_si128((void*)(cur+x),score); 
+		} 
+		
+		if (!LoBound[y+1]) { 
+			*LoBound = y; /* truncation location */ 
+			return -1; 
+		} 
+		++LoBound[y+1]; /* we guarantee the bounds will close in */ 
+		++HiBound[y+1]; /* since it'll bound the 'for (...x < rightBound; ++x)' */ 
+		_mm_store_si128((void*)(cur+HiBound[y+1]),_mm_set1_epi8(-1)); /* kill the right block */ 
+		
+		DualCoil *temp = cur; 
+		cur = y <= cacheSz ? cur + width : prev; 
+		prev = y <= cacheSz ? prev + width : temp; 
+		/*if (LoBound[y+1] > 1) */
+		_mm_store_si128((void*)(cur+LoBound[y+1] - 1), _mm_set1_epi8(-1)); /* kill left of new */ 
+		HiBound[y+1] += HiBound[y+1] < rwidth; 
+	} 
+	
+	/* Vectorized min reduction */ 
+	DualCoil *last = prev; 
+	__m128i minIntV = _mm_set1_epi8(-1); 
+	for (uint32_t i = LoBound[qlen-1]; i < HiBound[qlen-1]; ++i) 
+		minIntV = _mm_min_epu8(minIntV,_mm_load_si128((void*)(last+i))); 
+	_mm_stream_si128((void*)MinA,minIntV); 
+	__m128i c = _mm_srli_si128(minIntV,8); 
+	__m128i b = _mm_min_epu8(minIntV,c); 
+	c = _mm_srli_si128(b,4); 
+	b = _mm_min_epu8(b,c); 
+	c = _mm_srli_si128(b,2); 
+	b = _mm_min_epu8(b,c); 
+	c = _mm_srli_si128(b,1); 
+	b = _mm_min_epu8(b,c); 
+	
+	*LoBound = -1; 
+	return _mm_extract_epi8(b,0); /* save min of mins as new bound */ 
+}
+/*inline uint32_t aded_mat16LW(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, uint32_t minlen, 
+ DualCoil *Matrix, DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) {
+	uint32_t min;
+	if (maxED <= 2) min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
+		Matrix, profile, maxED, startQ, LoBound, HiBound, MinA);
+	else {
+		uint32_t er = maxED >> 1;
+		min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
+			Matrix, profile, er, startQ, LoBound, HiBound, MinA);
+		if (min == -1) min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
+			Matrix, profile, maxED, startQ > er+1 ? startQ : er+1, LoBound, HiBound, MinA);
+	}
+	return min;
+}*/
 
 inline void translateNV(char* string, size_t len) { // makes string into nums
 	for (size_t i = 0; i < len; ++i) string[i] = CHAR2NUM[string[i]]; }
@@ -2522,23 +2591,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
 			printf("Finished at %llu [%f] for final round [%f].\n",totalPop,(double)(totalPop << 4)/totR,omp_get_wtime()-wtime);
 			
-			//totalPop = 0;
-			//for (uint32_t i = 0; i < totR; ++i) totalPop += FP_pop(p+IxArray[i]);
-			//printf("DEBUG: memberwise bounded pop = %llu [%f]\n",totalPop, (double)(totalPop)/totR);
-			
-			
-			/*for (uint32_t i = 0; i < tot16; ++i) 
-				P[i] = IxArray[i] >= totR ? (Prince){0} : p[IxArray[i]];
-			for (uint32_t i = 0; i < tot16; i+=16) {
-				Prince charming = P[i];
-				for (uint32_t j = 1; j < 16; ++j) 
-					charming = FP_combine(charming,P[i+j]);
-				ClusFPs[i >> 4] = FP_pop(&charming);
-			}
-			totalPop = 0;
-			for (uint32_t i = 0; i < tot16 >> 4; ++i) totalPop += ClusFPs[i];
-			printf("Raw check: %llu [%f].\n",totalPop,(double)(totalPop << 4)/totR);*/
-			
 			free(ClusFPs);
 		}
 		uint32_t *ClusIX = IxArray; // reassign!
@@ -3101,8 +3153,8 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 			if (len < SCOUR_N || Sb.ed >= len/SCOUR_N) QStat[i] = 2;
 		
 			else for (uint32_t j = 0; j < len; ++j) {
-				if ((totN += s[j] > 4 + Z) > 4) {QStat[i] = 2; break;} // New! +Z 'cuz N not abig'
-				else if (totN) QStat[i] = 0;
+				if ((totN += s[j] > 4 + Z) > 5) {QStat[i] = 2; break;} // New! +Z 'cuz N not ambig'
+				else if (s[j] > 4) QStat[i] = 0; // but they still demote to ambig bin
 				//if (s[j] > 4) {
 				//		QStat[i] = 0; // set as ambig-containing
 				//	if (++totN > 5 || ++rowN > 3) {QStat[i] = 2; break;}
@@ -3407,38 +3459,50 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 
 	Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
 	if (!F) {fputs("OOM:AccelerantF\n",stderr); exit(3);}
-	#define AMLIM 6
-	
+	const uint32_t AMLIM = Rd->skipAmbig ? 0 : 7;
+	size_t fullSize = (Rd->maxLenR*(1<<(2*AMLIM)))*16;
+	printf("Size of entity manager: %u\n",fullSize);
 	#pragma omp parallel num_threads(THREADS)
 	{
-		int tid = omp_get_thread_num();
+		int tid = omp_get_thread_num(), skipAmbig = Rd->skipAmbig;
 		uint8_t *WordsYN = calloc((1 << (2*SCOUR_N)) >> 3,sizeof(*WordsYN)); // 128MB
-		uint32_t *WordCache = malloc((Rd->maxLenR*(1<<(2*AMLIM)))*16*sizeof(*WordCache)); 
+		uint32_t *WordCache = malloc(fullSize*sizeof(*WordCache)); 
 		if (!WordsYN || !WordCache) {fputs("OOM:WordsYN\n",stderr); exit(3);}
 
 		const uint32_t AMBIG = 4 + Z, RNG = SCOUR_N-1;
 		#pragma omp for schedule(static,1) reduction(+:badSz)
 		for (uint32_t i = 0; i < totRC; ++i) {
 			if (!(done & 255)) printf("\rScanning accelerator [%u / %u]\r",done,totRC);
-			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ), Tsum = 0;
 			uint16_t doAmbig = 0;
-			for (uint32_t z = begin; z < end; ++z) { // specific sequence
+			if (!skipAmbig) for (uint32_t z = begin; z < end; ++z) { // each seq
 				uint32_t len = RefLen[RefIxSrt[z]]; 
 				if (len < SCOUR_N) continue;
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t Asum = 0;
-				for (int j = 0; j < len; ++j) {
-					if (j >= RNG && s[j-RNG] > AMBIG) --Asum;
+				for (int j = 0; j < len; ++j) { // try to precompute sizes
+					if (j >= RNG) {
+						Tsum += 1 << (Asum+Asum);
+						if (s[j-RNG] > AMBIG) --Asum;
+					}
 					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
-					if (Asum > AMLIM) {++badSz; goto MULTI_ACC_END;}
+					if (Tsum >= fullSize) {++badSz; goto MULTI_ACC_END;}
 				}
 			}
 			uint32_t I = 0;
-			for (uint32_t z = begin; z < end; ++z) { 
+			for (uint32_t z = begin; z < end; ++z) {
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t len = RefLen[RefIxSrt[z]];
 				if (len < SCOUR_N) continue;
-				if (Z) { // screen for N's first!
+				if (skipAmbig) {
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
+						uint32_t k = 0; 
+						for (; k < SCOUR_N; ++k) if (s[j+k] >= 5) break;
+						if (k < SCOUR_N) { j+= k; continue; }
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
+					}
+				}
+				else if (Z) { // screen for N's first!
 					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
 						uint32_t k = 0; 
 						for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
@@ -3487,17 +3551,20 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		#pragma omp for schedule(static,1)
 		for (uint32_t i = 0; i < totRC; ++i) {
 			if (!(done & 255)) printf("\rFilling accelerator [%u / %u]\r",done,totRC);
-			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ), Tsum = 0;
 			uint16_t doAmbig = 0;
-			for (uint32_t z = begin; z < end; ++z) { // specific sequence
+			if (!skipAmbig) for (uint32_t z = begin; z < end; ++z) { // specific sequence
 				uint32_t len = RefLen[RefIxSrt[z]]; 
 				if (len < SCOUR_N) continue;
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t Asum = 0;
-				for (int j = 0; j < len; ++j) {
-					if (j >= RNG && s[j-RNG] > AMBIG) --Asum;
+				for (int j = 0; j < len; ++j) { // try to precompute sizes
+					if (j >= RNG) {
+						Tsum += 1 << (Asum+Asum);
+						if (s[j-RNG] > AMBIG) --Asum;
+					}
 					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
-					if (Asum > AMLIM) {
+					if (Tsum >= fullSize) {
 						uint32_t bix;
 						#pragma omp atomic capture
 						bix = badSz++;
@@ -3511,7 +3578,14 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t len = RefLen[RefIxSrt[z]];
 				if (len < SCOUR_N) continue;
-				if (Z) { // screen for N's first!
+				if (skipAmbig) {
+					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
+						uint32_t k = 0; 
+						for (; k < SCOUR_N; ++k) if (s[j+k] >= 5) break;
+						if (k < SCOUR_N) { j+= k; continue; }
+						countAmbigScour(WordsYN, WordCache, &I, s+j, 0, 0);
+					}
+				} else if (Z) { // screen for N's first!
 					for (uint32_t j = 0; j + SCOUR_N <= len; ++j) {
 						uint32_t k = 0; 
 						for (; k < SCOUR_N; ++k) if (s[j+k] == 5) break;
@@ -3564,8 +3638,6 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
 	fwrite(Bad, sizeof(*Bad), badSz, out);
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
-	//for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) free(F[i].Refs);
-	//free(F), free(Bad);
 }
 
 void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
@@ -3920,7 +3992,7 @@ if (DO_ACCEL) {
 	        a[j] = key;
 	    }
 	}
-	
+	szBL = skipAmbig? 0:szBL; // experimental; skips ambiguous accelerants
 	printf("Using ACCELERATOR to align %u unique queries...\n", QBins[1]);
 	#pragma omp parallel
 	{
@@ -3961,23 +4033,21 @@ if (DO_ACCEL) {
 			//memset(Hash,0,numRclumps*sizeof(*Hash));
 			for (uint32_t j = 0; j < oldNref; ++j) Refs[j].i = 0; //Bucket[j] = 0; // Bucket memset
 			uint32_t bound = MIN(z+QBUNCH,QBins[1]), nref = 0, min_mmatch = UINT32_MAX;
-			uint32_t wix = 0, cix = 0;
+			uint32_t wix = 0, cix = 0, minlen = -1; // mlen NEW
 			UniBins[z].div = 1; // Instead of inner loop; because it trails nothing before it
 			for (uint32_t j = z; j < bound; ++j) {
 				UniBin Ub = UniBins[j]; ShrBin Sb = ShrBins[Ub.six];
 				uint32_t len = Sb.len, err = Sb.ed;
+				minlen = len < minlen ? len : minlen; // NEW
 				if (err == -1) continue;
 				char *s = Ub.Seq; 
 				uint32_t mmatch = len - SCOUR_N * err - SCOUR_N; // len - (err + 1) * SCOUR_N;
 				if (mmatch < min_mmatch) min_mmatch = mmatch; // bank worst-case threshold
 				//printf("Query %u: len = %u, err = %u, runsize = %u, mmatch = %u\n", j, len, err, (len - err)/(err+1), mmatch);
 				//if (j == z) Ub.div = 1; // remove in loop below?
-				uint32_t initk = 0;
-				//if (Ub.div > SCOUR_N) initk = Ub.div - SCOUR_N;
-				//initk -= initk != 0;
 				if (j >= *QBins) { //storeUnambigWords(Word_Ix, s, len, &wix, j);
-					uint32_t k = initk, w = s[k++] - 1;
-					for (; k + 1 < SCOUR_N + initk; ++k)
+					uint32_t k = 0, w = s[k++] - 1;
+					for (; k + 1 < SCOUR_N; ++k)
 						w <<= 2, w |= s[k]-1;
 					for (; k < len; ++k) {
 						w <<= 2, w |= s[k]-1;
@@ -3985,8 +4055,14 @@ if (DO_ACCEL) {
 						Word_Ix[wix++] = (Split){t,j};
 					}
 				}
-				else for (uint32_t k = initk; k + SCOUR_N <= len; ++k) 
+				else for (uint32_t k = 0; k + SCOUR_N <= len; ++k) {
+					if (Z) { // N-skip case
+						uint32_t p=k, e = k+SCOUR_N; 
+						for (; p<e; ++p) if (s[p]==5) break;
+						if (p<e) {k=p; continue;}
+					}
 					storeAmbigWords(Word_Ix, s + k, &wix, j, 0, 0);
+				}
 				/* if (j >= *QBins) {//storeUnambigWords(Word_Ix, s, len, &wix, j);
 					uint32_t w = *s - 1;
 					for (uint32_t k = 1; k + 1 < SCOUR_N; ++k)
@@ -4139,7 +4215,9 @@ if (DO_ACCEL) {
 						//if (Xalpha) min = aded_xalpha(rclump,UniqQSeq[j],rlen,UniqQLen[ai], rdim, 
 						//	Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
 						//else 
-						min = aded_mat16(rclump,Ub->Seq,rlen,len, rdim, 
+						//min = aded_mat16(rclump,Ub->Seq,rlen,len, rdim, // TODO: dip-n-dot, length restriction, 
+						//	Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
+						min = aded_mat16L(rclump,Ub->Seq,rlen,len, rdim, minlen,// TODO: dip-n-dot
 							Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
 						//printf("--> min = %u\n",min);
 						if (min <= Sb->ed) { // now we get serious.
@@ -4358,14 +4436,12 @@ if (DO_ACCEL) {
 					if (Emac <= StackE[stack_ix]) {
 						thisDiv = 1; if (stack_ix) {
 							uint32_t sai = StackX[stack_ix], lenD;
-							//sai = sai >= numUniqQ ? RCMap[sai-numUniqQ] : sai;
 							lenD = MIN(len,ShrBins[UniBins[sai].six].len) - 1;
-							register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; //UniqQSeq[StackX[stack_ix]];
+							register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; 
 							for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
 								thisQ[w] == prevQ[w]; ++w) ++thisDiv; 
 						}
 					}
-					//Emac = StackE[stack_ix ? stack_ix - 1 : stack_ix];
 				}
 
 				// if error tol exceed cur stack, increment stack, set this ptr
@@ -4373,17 +4449,11 @@ if (DO_ACCEL) {
 					while (Emac > StackE[--stack_ix]); // pop until errors <= Stack errors
 					thisDiv = 1; if (stack_ix) {
 						uint32_t sai = StackX[stack_ix], lenD;
-						//sai = sai >= numUniqQ ? RCMap[sai-numUniqQ] : sai;
 						lenD = MIN(len,ShrBins[UniBins[sai].six].len) - 1;
-						register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; //UniqQSeq[StackX[stack_ix]];
+						register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; 
 						for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
 							thisQ[w] == prevQ[w]; ++w) ++thisDiv; 
 					}
-					/* register char *thisQ = UniqQSeq[qi], *prevQ = UniqQSeq[StackX[stack_ix]];
-					//thisDiv = 1; if (stack_ix) while (*thisQ++ == *prevQ++ && ++thisDiv < maxDiv);
-					thisDiv = 1; if (stack_ix) 
-						for (uint32_t w = 0; w < UniqQLen[qi] && w < UniqQLen[StackX[stack_ix]] && 
-							thisDiv < maxDiv && thisQ[w] == prevQ[w]; ++w) ++thisDiv;  */
 				}
 				stack_ix += Emac < StackE[stack_ix];
 				StackX[stack_ix] = qi;
@@ -4397,12 +4467,14 @@ if (DO_ACCEL) {
 				else min = aded_mat16(rclump,Ub->Seq,rlen,len, rdim, 
 					Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
 				
+				uint32_t fmin = min; // to allow a bulge
 				if (min <= Sb->ed) { // now we get serious.
 					//uint32_t ai = Ub->six;
 					if (RUNMODE != FORAGE && RUNMODE != ANY) {
-						if (min < Sb->ed) Sb->ed = min;
+						fmin -= (min? RUNMODE == COMMUNIST:0); // TODO: FINISH
+						if (fmin < Sb->ed) Sb->ed = fmin;
 						ResultPod *prv;
-						if (Pods[ai] && min < Pods[ai]->mismatches) // purge
+						if (Pods[ai] && fmin < Pods[ai]->mismatches) // purge
 							do prv = Pods[ai]->next, free(Pods[ai]), Pods[ai] = prv; while(Pods[ai]);
 					} else min = Emac; // all valid refs can be explored
 					MetaPack MPK;
@@ -4433,23 +4505,6 @@ if (DO_ACCEL) {
 							stIxR = rp->finalPos - qlen + rp->numGapR + mOff,
 							edIxR = rp->finalPos + mOff;
 							if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
-							/* if (taxa_parsed) {
-								char *tt = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-								if (taxasuppress) {
-									uint32_t lm, s = 0; 
-									strcpy(Taxon, tt);
-									for (lm = 0; TAXLEVELS[lm] < rp->score; ++lm);
-									if (!lm) FinalTaxon = NULLTAX;
-									else for (int x = 0; Taxon[x]; ++x) {
-										if (Taxon[x]==';' && ++s == lm) {
-											Taxon[x] = 0; break;
-										}
-										FinalTaxon = Taxon;
-									}
-								} else FinalTaxon = tt; // i
-								for (uint32_t j = Offset[Ub->six]; j < Offset[Ub->six+1]; ++j) PRINT_MATCH_TAX()
-							}
-							else  */
 							if (Sb->ed != -1) for (uint32_t j = Offset[Ub->six]; j < Offset[Ub->six+1]; ++j) 
 								fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", 
 								QHead[j], RefHead[rix], rp->score * 100, 
@@ -4461,46 +4516,12 @@ if (DO_ACCEL) {
 						Pods[ai] = tmp;
 					}
 				}
-				/*if (min <= UniqQed[ai]) { // now we get serious.
-					if (RUNMODE != FORAGE) {
-						if (min < UniqQed[ai]) UniqQed[ai] = min;
-						ResultPod *prv;
-						if (Pods[ai] && min < Pods[ai]->mismatches) // purge
-							do prv = Pods[ai]->next, free(Pods[ai]), Pods[ai] = prv; while(Pods[ai]);
-					} else min = Emac; // all valid refs can be explored
-					MetaPack MPK;
-					reScoreM(rclump,UniqQSeq[qi],rlen,UniqQLen[ai], rdim, ScoresEX, ShiftsEX,
-						ShiftsBX, min, pclump,&MPK);
-					for (int z = 0; z < VECSZ; ++z) { 
-						if (mins.u8[z] > min) continue; 
-						ResultPod *tmp = malloc(sizeof(*tmp));
-						tmp->next = Pods[ai]; Pods[ai] = tmp;
-						
-						Pods[ai]->mismatches = mins.u8[z];
-						Pods[ai]->score = MPK.score[z];
-						Pods[ai]->refIx = ri * VECSZ + z;
-						Pods[ai]->finalPos = MPK.finalPos[z];
-						Pods[ai]->numGapR = MPK.numGapR[z];
-						Pods[ai]->numGapQ = MPK.numGapQ[z];
-						Pods[ai]->rc = ai != qi;
-					}
-				}*/
 			}
 			#pragma omp atomic
 			++totDone;
 			tid = omp_get_thread_num();
 			if (!tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone / numRclumps);
 		}
-		/* #pragma omp master
-		printf("\rSearch Progress: [100.00%%]\n");
-		#pragma omp critical
-		{
-			//#pragma omp parallel for
-			for (uint32_t i = 0; i < numUniqQ; ++i) {
-				Pods[i]->next = FinalPod[i];
-				FinalPod[i] = &PodBase[i];
-			}
-		} */
 		ThreadPods[omp_get_thread_num()] = Pods;
 		free(HiBound); free(LoBound); free(StackE); free(StackX); free(Matrices);
 		free(ScoresEX); free(ShiftsEX); free(ShiftsBX); //free(Pods);
@@ -4584,12 +4605,6 @@ if (DO_ACCEL) {
 					stIxR = rp->finalPos - ShrBins[i].len + rp->numGapR + mOff;
 					ResultPod *next = rp->next;
 
-					// if (map >= RefDat.numRefHeads) {
-					// 	printf("\nERROR: map is out of range: query %u; map = %u; rng = %u\n",i,map,RefDat.numRefHeads);
-					// 	printf("-->rix = %u, Head = %s\n",rix,RefHead[rix]);
-					// 	rp = next; continue;
-					// 	//exit(4);
-					// }
 					PosP *pt = Grid[map], *pto = 0;
 					while (pt) {
 						if (stIxR + (DB_QLEN>>1) > pt->i && stIxR < pt->i + (DB_QLEN>>1)) {
@@ -4740,16 +4755,8 @@ if (DO_ACCEL) {
 			BasePod[i] = rp; // hedging derivative futures
 
 			while (rp) {
-				if (rp->mismatches == best->mismatches) {
-					//if (RefDedupIx) 
-					//	for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k)
-					//		++RefCounts[RefMap[TmpRIX[k]]], ++tot;
-					//else 
-					//if (rp->refIx >= totR) {printf("ERROR refIX %u/%u\n",rp->refIx,totR); exit(5);}
-					//if (RefIxSrt[rp->refIx] >= totR) {printf("ERROR RefIxSrt[rp->refIx] %u/%u\n",RefIxSrt[rp->refIx],totR); continue;}
-					//if (RefMap[RefIxSrt[rp->refIx]] >= totR) {printf("NOTE: RefMap[RefIxSrt[rp->refIx]] %u/%u\n",RefMap[RefIxSrt[rp->refIx]],totR); }
+				if (rp->mismatches == best->mismatches) 
 					++RefCounts[RefMap[RefIxSrt[rp->refIx]]], ++tot;
-				}
 				rp = rp->next;
 			}
 		}
@@ -4811,7 +4818,7 @@ if (DO_ACCEL) {
 					if (!maxDiv) {Taxon[0] = 0; FinalTaxon = Taxon; goto END_CAP_TAX;}
 
 					// Ascend tree based on divergences
-					uint32_t cutoff = tix - tix/TAXACUT; // need 90% support?
+					uint32_t cutoff = tix - tix/TAXACUT; 
 					//printf("    Query: %s, cutoff = %u, tix = %u\n", QHead[NewIX[Offset[i]]], cutoff, tix);
 					uint32_t st = 0, ed = tix;
 					for (lv = 1; lv <= maxDiv; ++lv) {
@@ -4949,45 +4956,45 @@ int main( int argc, char *argv[] ) {
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i],"--references") || !strcmp(argv[i],"-r")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --references requires filename argument."); exit(1);}
+				{ puts("ERROR: --references requires filename argument"); exit(1);}
 			ref_FN = argv[i];
 		}
 		else if (!strcmp(argv[i],"--queries") || !strcmp(argv[i],"-q")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --queries requires filename argument."); exit(1);}
+				{ puts("ERROR: --queries requires filename argument"); exit(1);}
 			query_FN = argv[i];
 		}
 		else if (!strcmp(argv[i],"--output") || !strcmp(argv[i],"-o")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --output requires filename argument."); exit(1);}
+				{ puts("ERROR: --output requires filename argument"); exit(1);}
 			output_FN = argv[i];
 		}
 		//puts("--forwardreverse (-fr): also search the reverse complement of queries"); 
 		else if (!strcmp(argv[i],"--forwardreverse") || !strcmp(argv[i],"-fr")) {
 			QDat.rc = 1; 
-			printf(" --> Also considering the reverse complement of reads.\n");
+			printf(" --> Also considering the reverse complement of reads\n");
 		}
 		else if (!strcmp(argv[i],"--whitespace") || !strcmp(argv[i],"-w")) {
 			QDat.incl_whitespace = 1; 
-			printf(" --> Allowing whitespace in query name output.\n");
+			printf(" --> Allowing whitespace in query name output\n");
 		}
 		else if (!strcmp(argv[i],"--npenalize") || !strcmp(argv[i],"-n")) {
 			Z = 1; // global
-			printf(" --> Setting N penalty (ref N vs query A/C/G/T).\n");
+			printf(" --> Setting N penalty (ref N vs query A/C/G/T)\n");
 		}
 		else if (!strcmp(argv[i],"--nwildcard") || !strcmp(argv[i],"-y")) {
 			Z = 0; // global
-			printf(" --> Setting N's and X's to wildcards (match anything).\n");
+			printf(" --> Setting N's and X's to wildcards (match anything)\n");
 		}
 		else if (!strcmp(argv[i],"--xalphabet") || !strcmp(argv[i],"-x")) {
 			Xalpha = 1; // global
-			printf(" --> Allowing any alphabet (unambiguous ID matching).\n");
+			printf(" --> Allowing any alphabet (unambiguous ID matching)\n");
 		}
 		else if (!strcmp(argv[i],"--taxonomy") || !strcmp(argv[i],"-b")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --taxonomy requires filename argument."); exit(1);}
+				{ puts("ERROR: --taxonomy requires filename argument"); exit(1);}
 			tax_FN = argv[i];
-			printf(" --> Assigning taxonomy based on input file %s.\n",tax_FN);
+			printf(" --> Assigning taxonomy based on mapping file: %s\n",tax_FN);
 		}
 		else if (!strcmp(argv[i],"--mode") || !strcmp(argv[i],"-m")) {
 			if (++i == argc || argv[i][0] == '-')  
@@ -4995,12 +5002,13 @@ int main( int argc, char *argv[] ) {
 			if (!strcmp(argv[i],"BEST")) RUNMODE = BEST;
 			else if (!strcmp(argv[i],"ALLPATHS")) RUNMODE = ALLPATHS;
 			else if (!strcmp(argv[i],"CAPITALIST")) RUNMODE = CAPITALIST;
+			else if (!strcmp(argv[i],"COMMUNIST")) RUNMODE = COMMUNIST;
 			else if (!strcmp(argv[i],"ANY")) RUNMODE = ANY;
 			else if (!strcmp(argv[i],"MATRIX")) 
 				{fputs("ERROR: Matrix mode is no longer supported\n",stderr); exit(1);}
 			else if (!strcmp(argv[i],"FORAGE")) RUNMODE = FORAGE;
 			else {printf("Unsupported run mode '%s'\n",argv[i]); exit(1);}
-			printf(" --> Setting run mode to %s.\n",argv[i]);
+			printf(" --> Setting run mode to %s\n",argv[i]);
 		}
 		else if (!strcmp(argv[i],"--makedb") || !strcmp(argv[i],"-d")) {
 			makedb = 1; char *dbsel = "QUICK"; // make this read the default
@@ -5021,7 +5029,7 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--dbpartition") || !strcmp(argv[i],"-dp")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --dbpartition requires integer argument."); exit(1);}
+				{ puts("ERROR: --dbpartition requires integer argument"); exit(1);}
 			int temp = atoi(argv[i]);
 			if (temp < 0) {fputs("ERROR: numb partitions must be >= 1\n",stderr); exit(1);}
 			RefDat.cparts = temp;
@@ -5029,14 +5037,14 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--accelerator") || !strcmp(argv[i],"-a")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --accelerator requires filename argument."); exit(1);}
+				{ puts("ERROR: --accelerator requires filename argument"); exit(1);}
 			xcel_FN = argv[i];
 			DO_ACCEL = 1;
 			printf(" --> Using accelerator file %s\n",xcel_FN);
 		}
 		else if (!strcmp(argv[i],"--taxacut") || !strcmp(argv[i],"-bc")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --taxacut requires integer argument."); exit(1);}
+				{ puts("ERROR: --taxacut requires integer argument"); exit(1);}
 			int temp = atoi(argv[i]);
 			if (temp < 2) {fputs("ERROR: taxacut must be >= 2\n",stderr); exit(1);}
 			TAXACUT = temp;
@@ -5044,11 +5052,11 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--taxa_ncbi") || !strcmp(argv[i],"-bn")) {
 			taxa_lookup = taxa_lookup_ncbi;
-			printf(" --> Using NCBI header formatting for taxonomy lookups.\n");
+			printf(" --> Using NCBI header formatting for taxonomy lookups\n");
 		}
 		else if (!strcmp(argv[i],"--skipambig") || !strcmp(argv[i],"-sa")) {
-			QDat.skipAmbig = 1;
-			printf(" --> Skipping highly ambiguous queries (5+ ambiguous bases).\n");
+			QDat.skipAmbig = RefDat.skipAmbig = 1;
+			printf(" --> Skipping highly ambiguous sequences\n");
 		}
 		else if (!strcmp(argv[i],"--taxasuppress") || !strcmp(argv[i],"-bs")) {
 			QDat.taxasuppress = 1;
@@ -5056,20 +5064,20 @@ int main( int argc, char *argv[] ) {
 				if (!strcmp(argv[++i],"STRICT")) TAXLEVELS = TAXLEVELS_STRICT;
 				else {fprintf(stderr,"ERROR: Unrecognized taxasuppress '%s'\n",argv[i]); exit(1);}
 			}
-			printf(" --> Surpressing taxonomic specificity by alignment identity%s.\n",
+			printf(" --> Surpressing taxonomic specificity by alignment identity%s\n",
 				TAXLEVELS == TAXLEVELS_STRICT ? " [STRICT]" : "");
 		}
 		else if (!strcmp(argv[i],"--id") || !strcmp(argv[i],"-i")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --id requires decimal argument."); exit(1);}
+				{ puts("ERROR: --id requires decimal argument"); exit(1);}
 			THRES = atof(argv[i]);
 			if (THRES > 1.f || THRES < 0.f) {puts("Invalid id range [0-1]"); exit(1);}
 			if (THRES < 0.01f) THRES = 0.01f;
-			printf(" --> Setting identity threshold to %f.\n",THRES);
+			printf(" --> Setting identity threshold to %f\n",THRES);
 		}
 		else if (!strcmp(argv[i],"--threads") || !strcmp(argv[i],"-t")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --threads requires integer argument."); exit(1);}
+				{ puts("ERROR: --threads requires integer argument"); exit(1);}
 			THREADS = HAS_OMP ? atoi(argv[i]) : 1;
 			printf(" --> Setting threads to %d%s\n",THREADS, HAS_OMP ? "" : " (no MT!)");
 		}
@@ -5084,11 +5092,11 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--unique") || !strcmp(argv[i],"-u")) {
 			doDedupe = 1; // global
-			printf(" --> Preprocessing references (dereplicating).\n");
+			printf(" --> Preprocessing references (dereplicating)\n");
 		}
 		else if (!strcmp(argv[i],"--fingerprint") || !strcmp(argv[i],"-f")) {
 			DO_FP = 1; // global
-			printf(" --> Using fingerprint profiling.\n");
+			printf(" --> Using fingerprint profiling\n");
 		}
 		else if (!strcmp(argv[i],"--prepass") || !strcmp(argv[i],"-p")) {
 			printf(" --> Using fingerprint pre-checks ");
@@ -5104,25 +5112,25 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--cache") || !strcmp(argv[i],"-c")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --cache requires integer argument."); exit(1);}
+				{ puts("ERROR: --cache requires integer argument"); exit(1);}
 			cacheSz = atoi(argv[i]); // global
-			printf(" --> Setting number of cached lines in matrix to %d.\n",cacheSz);
+			printf(" --> Setting number of cached lines in matrix to %d\n",cacheSz);
 		}
 		else if (!strcmp(argv[i],"--latency") || !strcmp(argv[i],"-l")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --latency requires integer argument."); exit(1);}
+				{ puts("ERROR: --latency requires integer argument"); exit(1);}
 			LATENCY = atoi(argv[i]); // global
-			printf(" --> Setting clump formation latency to %d bases.\n",LATENCY);
+			printf(" --> Setting clump formation latency to %d bases\n",LATENCY);
 		}
 		else if (!strcmp(argv[i],"--clustradius") || !strcmp(argv[i],"-cr")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --clustradius requires integer argument."); exit(1);}
+				{ puts("ERROR: --clustradius requires integer argument"); exit(1);}
 			RefDat.clustradius = atoi(argv[i]); // Reference_data member
-			printf(" --> Setting FP cluster search radius to %d members.\n",RefDat.clustradius);
+			printf(" --> Setting FP cluster search radius to %d members\n",RefDat.clustradius);
 		}
 		else if (!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) PRINT_USAGE()
 		else {
-			printf("ERROR: Unrecognized command-line option: %s.\n",argv[i]);
+			printf("ERROR: Unrecognized command-line option: %s\n",argv[i]);
 			puts("See help by running with just '-h'");
 			exit(1);
 		}
