@@ -154,6 +154,7 @@ Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing
 First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; BURST is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
 
 ## Cite
-Al-Ghalith, Gabriel and Dan Knights. BURST enables optimal exhaustive DNA alignment for big data. DOI 2017:
-[![DOI](https://zenodo.org/badge/806850.svg)](https://doi.org/10.5281/zenodo.806850)
+Al-Ghalith, Gabriel and Dan Knights. BURST enables optimal exhaustive DNA alignment for big data. DOI 2017:doi.org/10.5281/zenodo.806850
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1037553.svg)](https://doi.org/10.5281/zenodo.806850)
 (please cite using DOI until manuscript is published)
