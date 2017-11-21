@@ -155,5 +155,5 @@ First, more alignments doesn't mean correct alignments. Second, be careful when 
 
 ## Cite
 Al-Ghalith, Gabriel and Dan Knights. BURST enables optimal exhaustive DNA alignment for big data. DOI 2017:
-[![DOI](https://zenodo.org/badge/80084099.svg)](https://zenodo.org/badge/latestdoi/80084099)
+[![DOI](https://zenodo.org/badge/806850.svg)](https://doi.org/10.5281/zenodo.806850)
 (please cite using DOI until manuscript is published)
