@@ -2,7 +2,7 @@
 BURST (formerly known as embalmer) is an optimal, high-speed pairwise sequence aligner specialized in aligning many NGS short reads against large reference databases.  
 
 ## Why
-As next-generation DNA sequencing data emerges faster than computational power can keep up, approximate heuristic solutions to the fundamental DNA alignment/mapping problem are increasingly used. Paradoxically, it seems, the more data we have, the less accurate the alignment algorithms used to analyze it. Algorithms with perfect sensitivity and specificity acheivable under mismatch constraints have been neglected in favor of techniques promising speedier alignment at the cost of absolute alignment quality (under some metrics of precision/accuracy/sensitivity/recall). BURST returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever. 
+As next-generation DNA sequencing data emerges faster than computational power can keep up, approximate heuristic solutions to the fundamental DNA alignment/mapping problem are increasingly used. Paradoxically, it seems, the more data we have, the less accurate the alignment algorithms used to analyze it. Algorithms with perfect sensitivity and specificity acheivable under mismatch constraints have been neglected in favor of techniques promising speedier alignment at the cost of absolute alignment quality (under some metrics of precision/accuracy/sensitivity/recall). BURST returns to the roots of provably optimal alignment algorithms, reinvigorating them with speedups as high as millions-fold without sacrificing any alignment quality whatsoever in the default operating modes. 
 
 ## What
 BURST is a truly, mathematically optimal high-throughput end-to-end short-read DNA aligner. It supports:
@@ -14,7 +14,7 @@ BURST is a truly, mathematically optimal high-throughput end-to-end short-read D
 - full IUPAC ambiguous base support in queries and references (with option to penalize N's in references)
 - ease-of-use: no installation (just download and run) with concise commandline interface
 - fast speed of operation. It can align 12 million 292-bp microbial amplicon sequences against the Greengenes 13.8 97% reference database in under 10 minutes on a quad E7-4850v2 server, or a couple of hours on a dual-core 2013 Macbook Air. It also aligns shotgun reads against very large databases (like the ~20GB IMG annotated bacterial genes database); 0.99.2 can align at a rate of *over 10,000 100bp reads per second* against a 31.5GB subset of RefSeq complete genomes at 98% alignment identity on a single 32-core Ivy Bridge server. 
-- optional heuristic modes allowing faster alignments at lower similarity scores that completely invalidates everything I just said about optimality
+- optional heuristic modes allowing faster alignments at lower similarity scores which, if used at your own risk, completely invalidates everything I just said about optimality
 
 ## What not
 BURST does not currently implement the following, although all these are planned in future releases:
