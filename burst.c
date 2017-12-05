@@ -5301,7 +5301,7 @@ int main( int argc, char *argv[] ) {
 				{ puts("ERROR: --taxacut requires numeric argument"); exit(1);}
 			int temp = atoi(argv[i]);
 			if (temp < 2) { // interpret as float
-				double fl = atof(argv[i]);
+				double fl = 1.0 / (1.0 - atof(argv[i]));
 				temp = (int)(fl+0.5);
 				printf(" --> Taxacut: converting %s to %d...\n",argv[i],temp);
 			}
