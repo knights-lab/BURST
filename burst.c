@@ -2,7 +2,7 @@
 Copyright (C) 2015-2017 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.7"
+#define VER "v0.99.7a"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -115,7 +115,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	printf("  [qLen]: Optional. Max query length to search in DB [%d]\n",DB_QLEN); \
 	printf("\nPerformance parameters:\n"); \
 	printf("--dbpartition (-dp) <int>: Split DB making into <int> chunks (lossy) [%u]\n",1); \
-	printf("--taxacut (-bc) <int>: allow 1/<int> disagreeing taxonomy calls. 1/[%u]\n",TAXACUT); \
+	printf("--taxacut (-bc) <num>: allow 1/<int> rank discord OR %% conf; 1/[%u]\n",TAXACUT); \
 	printf("--taxa_ncbi (-bn): Assume NCBI header format '>xxx|accsn...' for taxonomy\n"); \
 	printf("--skipambig (-sa): Do not consider highly ambiguous queries (5+ ambigs)\n"); \
 	printf("--taxasuppress (-bs) [STRICT]: Surpress taxonomic specificity by %%ID\n"); \
@@ -1267,7 +1267,7 @@ void setScore() {
 	 -1,1,0,1,1,Z,1,0,1,0,0,1,0,0,0,1, //C [2]
 	 -1,1,1,0,1,Z,0,1,0,1,0,1,0,0,1,0, //G [3]
 	 -1,1,1,1,0,Z,0,1,1,0,1,0,0,1,0,0, //T/U [4]
-	 -1,0,0,0,0,Z,0,0,0,0,0,0,0,0,0,0, //N/X [5]
+	 -1,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z, //N/X [5]
 	 -1,1,1,0,0,Z,0,1,1,1,1,1,0,1,1,0, //K [6]
 	 -1,0,0,1,1,Z,1,0,1,1,1,1,1,0,0,1, //M [7]
 	 -1,0,1,0,1,Z,1,1,0,1,1,1,1,0,1,0, //R [8]
@@ -1294,6 +1294,21 @@ void setScore() {
 		   SCORENVedN[13*16 + 5] = Z,
 		   SCORENVedN[14*16 + 5] = Z,
 		   SCORENVedN[15*16 + 5] = Z;
+		   // Also penalize N in queries (new!)
+		   SCORENVedN[5*16 + 1] = Z;
+		   SCORENVedN[5*16 + 2] = Z;
+		   SCORENVedN[5*16 + 3] = Z;
+		   SCORENVedN[5*16 + 4] = Z;
+		   SCORENVedN[5*16 + 6] = Z;
+		   SCORENVedN[5*16 + 7] = Z;
+		   SCORENVedN[5*16 + 8] = Z;
+		   SCORENVedN[5*16 + 9] = Z;
+		   SCORENVedN[5*16 + 10] = Z;
+		   SCORENVedN[5*16 + 11] = Z;
+		   SCORENVedN[5*16 + 12] = Z;
+		   SCORENVedN[5*16 + 13] = Z;
+		   SCORENVedN[5*16 + 14] = Z;
+		   SCORENVedN[5*16 + 15] = Z;
 		   
 	#define BAD_IX 0
 	for (int i = 0; i < 65; ++i) CHAR2NUM[i] = BAD_IX;
@@ -1325,7 +1340,8 @@ void setScore() {
 	SCOREFAST[2]  = _mm_set_epi8(1,0,0,0,1,0,0,1,0,1,Z,1,1,0,1,-1); //C
 	SCOREFAST[3]  = _mm_set_epi8(0,1,0,0,1,0,1,0,1,0,Z,1,0,1,1,-1); //G
 	SCOREFAST[4]  = _mm_set_epi8(0,0,1,0,0,1,0,1,1,0,Z,0,1,1,1,-1); //T or U
-	SCOREFAST[5]  = _mm_set_epi8(0,0,0,0,0,0,0,0,0,0,Z,0,0,0,0,-1); //N or X
+	//SCOREFAST[5]  = _mm_set_epi8(0,0,0,0,0,0,0,0,0,0,Z,0,0,0,0,-1); //N or X
+	SCOREFAST[5]  = _mm_set_epi8(Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,Z,-1); //N or X
 	SCOREFAST[6]  = _mm_set_epi8(0,1,1,0,1,1,1,1,1,0,Z,0,0,1,1,-1); //K
 	SCOREFAST[7]  = _mm_set_epi8(1,0,0,1,1,1,1,1,0,1,Z,1,1,0,0,-1); //M
 	SCOREFAST[8]  = _mm_set_epi8(0,1,0,1,1,1,1,0,1,1,Z,1,0,1,0,-1); //R
@@ -3471,9 +3487,14 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 
 	Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
 	if (!F) {fputs("OOM:AccelerantF\n",stderr); exit(3);}
-	const uint32_t AMLIM = Rd->skipAmbig ? 0 : 8;
-	size_t fullSize = (Rd->maxLenR*(1<<(2*AMLIM)))*16;
+	const uint32_t AMLIM = Rd->skipAmbig ? 0 : 12;
+	size_t fullSize = INT32_MAX; //(Rd->maxLenR*(1<<(2*AMLIM)))*16;
 	//printf("Size of entity manager: %u\n",fullSize);
+	uint32_t IPOW3[16] = {1,3,9,27,81,243,729,2187,6561,19683,59049,177147,
+		531441,1594323,4782969,14348907};
+	uint32_t IPOW4[16] = {1,4,16,61,256,1024,4096,16384,65536,262144,1048576,
+		4194304,16777216,67108864,268435456,1073741824};
+	uint32_t *IPOWX = Z ? IPOW3 : IPOW4;
 	#pragma omp parallel num_threads(THREADS)
 	{
 		int tid = omp_get_thread_num(), skipAmbig = Rd->skipAmbig;
@@ -3485,7 +3506,8 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		#pragma omp for schedule(static,1) reduction(+:badSz)
 		for (uint32_t i = 0; i < totRC; ++i) {
 			if (!(done & 255)) printf("\rScanning accelerator [%u / %u]\r",done,totRC);
-			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ), Tsum = 0;
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
+			uint64_t Tsum = 0;
 			uint16_t doAmbig = 0;
 			if (!skipAmbig) for (uint32_t z = begin; z < end; ++z) { // each seq
 				uint32_t len = RefLen[RefIxSrt[z]]; 
@@ -3494,7 +3516,7 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 				uint32_t Asum = 0;
 				for (int j = 0; j < len; ++j) { // try to precompute sizes
 					if (j >= RNG) {
-						Tsum += 1 << (Asum+Asum);
+						Tsum += IPOWX[Asum];
 						if (s[j-RNG] > AMBIG) --Asum;
 					}
 					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
@@ -3563,16 +3585,18 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		#pragma omp for schedule(static,1)
 		for (uint32_t i = 0; i < totRC; ++i) {
 			if (!(done & 255)) printf("\rFilling accelerator [%u / %u]\r",done,totRC);
-			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ), Tsum = 0;
+			
+			uint32_t begin = i*VECSZ, end = MIN(totR, begin + VECSZ);
+			uint64_t Tsum = 0;
 			uint16_t doAmbig = 0;
-			if (!skipAmbig) for (uint32_t z = begin; z < end; ++z) { // specific sequence
+			if (!skipAmbig) for (uint32_t z = begin; z < end; ++z) { // each seq
 				uint32_t len = RefLen[RefIxSrt[z]]; 
 				if (len < SCOUR_N) continue;
 				char *s = RefSeq[RefIxSrt[z]]; 
 				uint32_t Asum = 0;
 				for (int j = 0; j < len; ++j) { // try to precompute sizes
 					if (j >= RNG) {
-						Tsum += 1 << (Asum+Asum);
+						Tsum += IPOWX[Asum];
 						if (s[j-RNG] > AMBIG) --Asum;
 					}
 					if (s[j] > AMBIG) ++Asum, doAmbig |= 1 << (z-begin);
@@ -3660,7 +3684,7 @@ void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		dbVer = (uint8_t)(cb << 4) >> 4,
 		didZ = (uint8_t)(cb << 1) >> 7; 
 	if (didZ && !Z) {
-		fprintf(stderr,"ERROR: Accelerator built with '-n'; must use '-n'\n");
+		fprintf(stderr,"ERROR: Accelerator built without '-y'; can't use '-y'\n");
 		exit(1);
 	}
 	int slen = 0;
@@ -5274,9 +5298,15 @@ int main( int argc, char *argv[] ) {
 		}
 		else if (!strcmp(argv[i],"--taxacut") || !strcmp(argv[i],"-bc")) {
 			if (++i == argc || argv[i][0] == '-') 
-				{ puts("ERROR: --taxacut requires integer argument"); exit(1);}
+				{ puts("ERROR: --taxacut requires numeric argument"); exit(1);}
 			int temp = atoi(argv[i]);
+			if (temp < 2) { // interpret as float
+				double fl = atof(argv[i]);
+				temp = (int)(fl+0.5);
+				printf(" --> Taxacut: converting %s to %d...\n",argv[i],temp);
+			}
 			if (temp < 2) {fputs("ERROR: taxacut must be >= 2\n",stderr); exit(1);}
+				
 			TAXACUT = temp;
 			printf(" --> Ignoring 1/%d disagreeing taxonomy calls\n",TAXACUT);
 		}
