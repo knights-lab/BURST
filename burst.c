@@ -1,8 +1,8 @@
 /* BURST aligner -- fast optimal aligner by Gabe. 
-Copyright (C) 2015-2017 Knights Lab, Regents of the University of Minnesota.
+Copyright (C) 2015-2018 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.7a"
+#define VER "v0.99.7b"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -118,7 +118,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	printf("--taxacut (-bc) <num>: allow 1/<int> rank discord OR %% conf; 1/[%u]\n",TAXACUT); \
 	printf("--taxa_ncbi (-bn): Assume NCBI header format '>xxx|accsn...' for taxonomy\n"); \
 	printf("--skipambig (-sa): Do not consider highly ambiguous queries (5+ ambigs)\n"); \
-	printf("--taxasuppress (-bs) [STRICT]: Surpress taxonomic specificity by %%ID\n"); \
+	printf("--taxasuppress (-bs) [STRICT]: Suppress taxonomic specificity by %%ID\n"); \
 	printf("--id (-i) <decimal>: target minimum similarity (range 0-1) [%.2f]\n",THRES);\
 	printf("--threads (-t) <int>: How many logical processors to use [%u]\n",THREADS);\
 	printf("--shear (-s) [len]: Shear references longer than [len] bases [%ld]\n",REBASE_AMT);\
@@ -2773,7 +2773,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 	if (REBASE) free(origRefLen), free(origRefSeq), free(origRefHead);
 }
 
-static inline void dump_edb(FILE *output, Reference_Data *Rd) {
+static inline void dump_edb_old(FILE *output, Reference_Data *Rd) {
 	fputc(0, output); // will be padded later
 	uint64_t totRefHeadLen = 0; uint32_t shear = DB_QLEN / THRES;
 	fwrite(&totRefHeadLen,sizeof(totRefHeadLen),1,output);
@@ -2808,6 +2808,110 @@ static inline void dump_edb(FILE *output, Reference_Data *Rd) {
 	rewind(output);
 	fputc(1 << 7 | REBASE << 6 | DO_FP << 5 | Xalpha << 4 | 
 		(EDB_VERSION - Xalpha), output); // 5: xalpha, 6: ?
+	fwrite(&totRefHeadLen, sizeof(totRefHeadLen), 1, output);
+}
+
+static inline void dump_edb(FILE *output, Reference_Data *Rd) {
+	fputc(0, output); // will be padded later
+	uint64_t totRefHeadLen = 0; uint32_t shear = DB_QLEN / THRES;
+	fwrite(&totRefHeadLen,sizeof(totRefHeadLen),1,output);
+	fwrite(&shear,sizeof(uint32_t),1,output); // V3
+	fwrite(&Rd->totR,sizeof(Rd->totR),1,output); 
+	fwrite(&Rd->origTotR,sizeof(Rd->origTotR),1,output);
+	fwrite(&Rd->numRclumps,sizeof(Rd->numRclumps),1,output);
+	fwrite(&Rd->maxLenR,sizeof(Rd->maxLenR),1,output);
+
+	// New: sort and dedupe
+	StrIxPair *Str_Ix = malloc(Rd->origTotR*sizeof(*Str_Ix));
+	for (uint32_t i = 0; i < Rd->origTotR; ++i) 
+		Str_Ix[i] = (StrIxPair){Rd->RefHead[i],i};
+	qsort(Str_Ix,Rd->origTotR,sizeof(*Str_Ix),cmpStrIx);
+	uint32_t *RefMap = malloc(Rd->origTotR*sizeof(*RefMap));
+	uint32_t nix = 0;
+	char *cur = Str_Ix[nix].s;
+	totRefHeadLen += 1 + fprintf(output, "%s", cur), fputc(0,output);
+	for (uint32_t i = 0; i < Rd->origTotR; ++i) {
+		if (strcmp(cur,Str_Ix[i].s)) {
+			cur = Str_Ix[i].s;
+			totRefHeadLen += 1 + fprintf(output, "%s", cur), fputc(0,output);
+			++nix;
+		}
+		RefMap[Str_Ix[i].ix] = nix;	
+	}
+	nix++;
+	fwrite(&nix, sizeof(nix), 1, output); // read in as numRefHeads
+	fwrite(RefMap, sizeof(*RefMap),Rd->origTotR, output);
+
+	/////////
+
+	// deprecated
+	// for (uint32_t i = 0; i < Rd->origTotR; ++i) 
+	// 	totRefHeadLen += fprintf(output,"%s",Rd->RefHead[i]) + 1,
+	// 	fputc(0, output); 
+
+	if (REBASE) 
+		fwrite(Rd->RefStart, sizeof(*Rd->RefStart), Rd->origTotR, output);
+	if (Rd->totR != Rd->origTotR) //puts("Dupewriting"), 
+		fwrite(Rd->RefDedupIx, sizeof(*Rd->RefDedupIx), Rd->totR+1, output);
+
+	// Write (sheared/deduped) clumps and mask into originals
+	fwrite(Rd->TmpRIX, sizeof(*Rd->TmpRIX), Rd->origTotR, output); // can infer RefIxSrt
+	fwrite(Rd->ClumpLen, sizeof(*Rd->ClumpLen), Rd->numRclumps, output);
+	
+	// New
+	uint64_t oldTotRPackLen = 0, totRPackLen = 0;
+	uint32_t *ClumpLen = Rd->ClumpLen; //, maxLenR = 0;
+	#pragma omp simd reduction(+:oldTotRPackLen,totRPackLen)
+	for (uint32_t i = 0; i < Rd->numRclumps; ++i) {
+		oldTotRPackLen += ClumpLen[i];
+		//if (ClumpLen[i] > maxLenR) maxLenR = ClumpLen[i];
+		totRPackLen += ClumpLen[i]/2u + (ClumpLen[i] & 1);
+	}
+	//printf("Computed maxLenR = %u, existing Rd->maxLenR = %u\n",maxLenR,Rd->maxLenR);
+	printf(" --> neoEDB: Original pack table: %llu [now %llu]\n",
+			oldTotRPackLen, totRPackLen);
+	
+	/*uint64_t totRPackLen = 0;
+	#pragma omp simd reduction(max:maxLenR) reduction(+:totRPackLen)
+	for (uint32_t i = 0; i < numRclumps; ++i) {
+		if (ClumpLen[i] > maxLenR) maxLenR = ClumpLen[i];
+		totRPackLen += ClumpLen[i]/2u + (ClumpLen[i] & 1);
+	}*/
+	// deprecated
+	//for (uint32_t i = 0; i < Rd->numRclumps; ++i)
+	//	fwrite(Rd->RefClump[i], sizeof(*Rd->RefClump[i]), Rd->ClumpLen[i], output);
+
+	//DualCoil *DC_Dump = malloc((oldTotRPackLen+1)*sizeof(*DC_Dump));
+	//if (!DC_Dump) {fputs("OOM:read_edb\n",stderr); exit(3);}
+	//fread(DC_Dump, sizeof(*DC_Dump), oldTotRPackLen, in);
+	uint64_t pix = 0, totWritten = 0;
+	for (uint32_t i = 0; i < Rd->numRclumps; ++i) {
+		DualCoil *rc = Rd->RefClump[i];
+		for (uint32_t j = 0; j < ClumpLen[i]; j+=2) {
+			__m128i i1 = _mm_load_si128((void*)(rc+j)); //(DC_Dump + pix++));
+			__m128i i2 = _mm_setzero_si128();
+			++pix;
+			if (j + 1 < ClumpLen[i]) i2 = _mm_load_si128((void*)(rc+j+1)), ++pix; //(DC_Dump + pix++));
+			i2 = _mm_and_si128(_mm_slli_epi16(i2,4),_mm_set1_epi8(0xF0));
+			DualCoil x;
+			_mm_store_si128((void*)&x, _mm_or_si128(i1, i2));
+			fwrite(&x, sizeof(x), 1, output);
+			++totWritten;
+		}
+	}
+	printf(" --> neoEDB: Number read: %llu, written: %llu\n", pix, totWritten);
+	//exit(101);
+	if (DO_FP) { // write centroid and nf prints
+		uint32_t nf = Rd->FingerprintsR.nf;
+		fwrite(Rd->Centroids, sizeof(*Rd->Centroids), Rd->numRclumps, output);
+		fwrite(&nf, sizeof(nf), 1, output);
+		if (nf) fwrite(Rd->FingerprintsR.Ptrs, sizeof(*Rd->FingerprintsR.Ptrs), Rd->totR, output);
+		else nf = Rd->totR; // if nf == 0, it means the FPs are unambiguous (N-penalized)
+		fwrite(Rd->FingerprintsR.P, sizeof(*Rd->FingerprintsR.P), nf, output);
+	}
+	rewind(output);
+	fputc(1 << 7 | REBASE << 6 | DO_FP << 5 | Xalpha << 4 | EDX_VERSION, output);
+		//(EDB_VERSION - Xalpha), output); // 5: xalpha, 6: ?
 	fwrite(&totRefHeadLen, sizeof(totRefHeadLen), 1, output);
 }
 
@@ -3477,7 +3581,7 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	if (!out) {fprintf(stderr, "Cannot write accelerator '%s'\n",xcel_FN); exit(1);}
 	char **RefSeq = Rd->RefSeq;
 	uint32_t *RefIxSrt = Rd->RefIxSrt, *RefLen = Rd->RefLen, totR = Rd->totR,
-		totRC = Rd->numRclumps;
+		totRC = Rd->numRclumps, origTotR = Rd->origTotR;
 	if (Z) fprintf(stderr,"Note: N-penalized accelerator not usable for unpenalized alignment\n");
 	
 	//THREADS = THREADS >> 1 ?: 1; //1; //THREADS > 4 ? 4 : THREADS;
@@ -3488,7 +3592,7 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	Accelerant *F = calloc(1 << (2*SCOUR_N), sizeof(*F));
 	if (!F) {fputs("OOM:AccelerantF\n",stderr); exit(3);}
 	const uint32_t AMLIM = Rd->skipAmbig ? 0 : 12;
-	size_t fullSize = INT32_MAX; //(Rd->maxLenR*(1<<(2*AMLIM)))*16;
+	size_t fullSize = SCOUR_N > 14 ? INT32_MAX : (1 << 24); //(Rd->maxLenR*(1<<(2*AMLIM)))*16;
 	//printf("Size of entity manager: %u\n",fullSize);
 	uint32_t IPOW3[16] = {1,3,9,27,81,243,729,2187,6561,19683,59049,177147,
 		531441,1594323,4782969,14348907};
@@ -3662,16 +3766,52 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	wtime = omp_get_wtime();
 		
 	size_t totalWords = 0;
+	uint32_t num_k = 1 << (2*SCOUR_N);
 	#pragma omp parallel for reduction(+:totalWords)
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) totalWords += F[i].len;
+	for (uint32_t i = 0; i < num_k; ++i) totalWords += F[i].len;
 	printf("Total accelerants stored: %llu (%u bad)\n",totalWords, badSz);
-	uint8_t vers = (1 << 7) | (Z << 6) | SCOUR_N;
+
+	// redux
+	// first calculate max
+	
+	uint32_t max = totR > origTotR ? totR : origTotR;
+
+	//for (uint32_t i = 0; i < num_k; ++i) max = F[i].
+
+	uint8_t vers = (1 << 7) | (Z << 6) | (max > 1048574 ? ACC_VERSION_BIG : ACC_VERSION);//vers = (1 << 7) | (Z << 6) | SCOUR_N;
+	setvbuf(out,0,_IOFBF,1<<21);
 	fwrite(&vers,sizeof(vers),1,out);
 	fwrite(&badSz, sizeof(badSz), 1, out);
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
+	for (uint32_t i = 0; i < num_k; ++i) 
 		fwrite(&F[i].len, sizeof(F[i].len), 1, out);
-	for (uint32_t i = 0; i < 1 << (2*SCOUR_N); ++i) 
-		fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
+	
+
+	//for (uint32_t i = 0; i < num_k; ++i) 
+	//	fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
+	//uint64_t count = 0;
+	if (max > 16777214) {fputs("ERROR: acc error 101\n",stderr); exit(101);}
+	else if (max > 1048574) {
+		fputs(" --> [Re-Accel] Writing LARGE format acx...\n", stderr);
+		//for (size_t i = 0; i < totalWords; ++i) // replace these "totalwords" things with the commented construct above
+		//	fwrite(WordDump + i*sizeof(uint32_t), 3, 1, out);
+		//count = totalWords;
+		for (uint32_t i = 0; i < num_k; ++i)
+			for (uint32_t k = 0; k < F[i].len; ++k)
+				fwrite(&F[i].Refs[k],3,1,out);
+
+	} else {
+		fputs(" --> [Re-Accel] Writing SMALL format acx...\n", stderr);
+		for (size_t i = 0; i < num_k; ++i) {
+			for (uint32_t *P = F[i].Refs; P < F[i].Refs+F[i].len; P+=2) {
+				uint64_t bay = *P;
+				bay |= (uint64_t)*(P+1) << 20;
+				//count += (P+1 < (uint32_t*)Forest[i+1]) ? 5 : 3;
+				fwrite(&bay, 1, (P+1 < (uint32_t*)F[i].Refs+F[i].len) ? 5 : 3, out); 
+			}
+		}
+	}
+
+
 	fwrite(Bad, sizeof(*Bad), badSz, out);
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
 }
@@ -4830,7 +4970,7 @@ if (DO_ACCEL) {
 	#pragma omp simd reduction(max:maxIX)
 	for (uint32_t i = 0; i < totR; ++i) 
 		maxIX = RefIxSrt[i] > maxIX ? RefIxSrt[i] : maxIX;
-	printf("Max IX for allocations = %u [totR = %u, origTotR = %u]\n",maxIX,totR,RefDat.origTotR);
+	//printf("Max IX for allocations = %u [totR = %u, origTotR = %u]\n",maxIX,totR,RefDat.origTotR);
 
 	free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 	free(SeqDumpRC); // free a part of the query memory
