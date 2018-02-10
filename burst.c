@@ -2,7 +2,7 @@
 Copyright (C) 2015-2018 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.7b"
+#define VER "v0.99.7d"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -635,104 +635,6 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 	return ix;
 }
 
-// universal non-vectorized aligner; needs nothing but ref, q, and lengths
-inline float alignNVU(char *ref, char *query, unsigned rlen, unsigned qlen) {
-	static const int DIAG = 0, UP = 1, LEFT = 2;
-	++rlen, ++qlen;
-	unsigned *scores = calloc(rlen*qlen,sizeof(*scores)); //malloc
-	unsigned *shifts = calloc(rlen*qlen,sizeof(*shifts));
-	unsigned *traces = calloc(rlen*qlen,sizeof(*traces));
-	for (int i = 0; i < qlen; ++i) scores[i*rlen] = i*GAP; // for edit distance
-	//for (int j = 0; j < rlen; ++j) matrix[j] = 0; //-j; // fill left to right
-	for (int y = 1; y < qlen; ++y) {
-		for (int x = 1; x < rlen; ++x) {
-			int scoreD = scores[(y-1)*rlen + x-1] + SCORENVedN[ref[x-1]*SCD + query[y-1]];
-			int scoreU = scores[(y-1)*rlen + x] + GAP;
-			int scoreL = scores[y*rlen + x-1] + GAP;
-			int shiftD = shifts[(y-1)*rlen + x-1];
-			int shiftU = shifts[(y-1)*rlen + x];
-			int shiftL = shifts[y*rlen + x-1] + 1;
-			int score, shift, trace;
-			
-			#define GOLEFT {score = scoreL, shift = shiftL, trace = LEFT;}
-			#define GOUP {score = scoreU, shift = shiftU, trace = UP;}
-			#define GODIAG {score = scoreD, shift = shiftD, trace = DIAG;}
-			GODIAG
-			
-			// Edit-distance only
-			if (scoreU < score) GOUP
-			if (scoreL < score) GOLEFT
-			
-			// Hybrid distance
-			//if ((scoreU < score) || (scoreU==score && shiftU > shift)) GOUP
-			//if ((scoreL < score) || (scoreL==score && shiftL > shift)) GOLEFT
-			
-			// ID only
-			//if ((float)scoreU/(y+shiftU) < (float)score/(y+shift)) GOUP
-			//if ((float)scoreL/(y+shiftL) < (float)score/(y+shift)) GOLEFT
-			
-			scores[y*rlen + x] = score;
-			shifts[y*rlen + x] = shift;
-			traces[y*rlen + x] = trace;
-		}
-	}
-	int score = INT_MAX, lasty = (qlen-1)*rlen, l=0;
-	//for (int i = 1; i < rlen; ++i) if (scores[lasty + i] < score) l=i, score = scores[lasty + i];
-	//printf("\nMin score found at %d = %d [%d]\n", l, (int)score, (int)shifts[lasty + l]);
-	
-	float c = 0, t; int ti, last=INT_MAX, lv=0;
-	for (int i = 1; i < rlen; ++i) 
-		//if ((t=(scores[lasty+i]+(qlen-1))/2+(qlen-1+shifts[lasty+i])) > c) lv=i, c = t;
-		if ((t=1.f-(float)scores[lasty+i]/(qlen-1+shifts[lasty+i])) > c) lv=i, c = t;
-		//{ti=scores[lasty+i]; if (ti < last || (ti==last && shifts[lasty+i] > shifts[lasty+lv])) lv=i, last=ti;}
-	//c = 1.f - (float)last/(qlen-1+shifts[lasty+lv]);
-	
-	///////////////// To skip output //////////////////
-			//free(scores); free(shifts); free(traces);
-			//return c; 
-	///////////////////////////////////////////////////
-	
-	printf("composite at %d = {%f} %d [%d]\n", lv, c, (int)scores[lasty+lv], 
-		(int)shifts[lasty+lv]); //, (int)gaps[lasty + lv]);
-	
-	// print output
-	int tb = qlen-1+shifts[lasty + lv], curX = lv, curY = qlen-1; 
-	char refString[tb+1], qString[tb+1], gString[tb+1], dString[tb+1];
-	for (int i=0; i<tb;++i) refString[i]='P', qString[i]='P',gString[i]='P',dString[i]='P';
-	refString[tb] = 0; qString[tb] = 0; gString[tb] = 0, dString[tb] = 0;
-	printf("tb = %d, curX = %d, curY = %d\n",tb,curX,curY);
-	
-	printf("Length of alignment = %d\n",tb);
-	--tb;
-	do {
-		if (traces[(curY)*rlen + curX] == DIAG) {
-			refString[tb] = curX ? BAK[ref[curX-1]] : '-';
-			qString[tb] = curY ? BAK[query[curY-1]] : '-';
-			gString[tb] = SCORENVedN[ref[curX-1]*SCD + query[curY-1]] ? ' ' : '|';
-			--curX; --curY;
-			dString[tb] = '='; //printf("=");
-		}
-		else if (traces[(curY)*rlen + curX] == UP) { // U 
-			refString[tb] = '-';
-			qString[tb] = curY ? BAK[query[curY-1]] : '-';
-			gString[tb] = ' ';
-			--curY;
-			dString[tb] = '<'; //printf("<");
-		}
-		else { // LEFT
-			refString[tb] = curX ? BAK[ref[curX-1]] : '-';
-			qString[tb] = '-'; //BAK[query[curY-1]];
-			gString[tb] = ' ';
-			--curX;
-			dString[tb] = '>'; //printf(">");
-		}
-	} while (tb--);
-	puts("");
-	printf("%s\n%s\n%s\n%s\n",dString, refString, gString, qString);
-	free(scores); free(shifts); free(traces);
-	return c; // or return score;
-}
-
 #define DIAGSC_XALPHA _mm_add_epi8(_mm_cmpeq_epi8(_mm_set1_epi8(qLet), \
 	rChunk),_mm_set1_epi8(1))
 #ifdef __SSSE3__
@@ -1116,8 +1018,7 @@ if (startQ > *LoBound) return -1; /* truncation signal */ \
 	return _mm_extract_epi8(b,0); /* save min of mins as new bound */ \
 }
 inline uint32_t aded_mat16(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, DualCoil *Matrix,
- DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) 
- ADED_PROTOTYPE(DIAGSC_MAT16)
+ DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) ADED_PROTOTYPE(DIAGSC_MAT16)
 inline uint32_t aded_xalpha(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, DualCoil *Matrix,
  DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) 
  ADED_PROTOTYPE(DIAGSC_XALPHA)
@@ -2175,7 +2076,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 
 	Rd->RefIxSrt = malloc((1+Rd->totR) * sizeof(*Rd->RefIxSrt));
 	if (!Rd->RefIxSrt) {fputs("OOM:RefIxSrt\n",stderr); exit(3);}
-
 	// Sort (shorn) references within length-adjusted pods
 	if (LATENCY) {
 		// sort refs by length (TODO: Better sort)
@@ -2200,7 +2100,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				if (i - prev_ix > 1) {
 					Tuxedo *thisTux = SeqLenPair + prev_ix;
 					uint32_t range = i - prev_ix;
-					printf("Sorting on i=%u, prev = %u (range=%u)\n",i,prev_ix,range);
+					//printf("Sorting on i=%u, prev = %u (range=%u)\n",i,prev_ix,range);
 					if (range > 256) parallel_sort_tuxedo(thisTux, range);
 					else qsort(thisTux, range, sizeof(*SeqLenPair),cmpPackSeq);
 				}
@@ -2209,7 +2109,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		}
 		if (prev_ix < Rd->totR-1)
 			//qsort(SeqLenPair + prev_ix, Rd->totR - prev_ix, sizeof(*SeqLenPair),cmpPackSeq);
-			if (Rd->totR - prev_ix > 1) printf("Sorting final (range=%u)\n",Rd->totR - prev_ix);
+			if (Rd->totR - prev_ix > 1) //printf("Sorting final (range=%u)\n",Rd->totR - prev_ix);
 				parallel_sort_tuxedo(SeqLenPair + prev_ix, Rd->totR - prev_ix);
 		
 		for (uint32_t i = 0; i < Rd->totR; ++i) Rd->RefIxSrt[i] = SeqLenPair[i].ix;
@@ -3789,7 +3689,7 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	//for (uint32_t i = 0; i < num_k; ++i) 
 	//	fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
 	//uint64_t count = 0;
-	if (max > 16777214) {fputs("ERROR: acc error 101\n",stderr); exit(101);}
+	if (max > 16777214) {fputs("ERROR: acc error M16\n",stderr); exit(101);}
 	else if (max > 1048574) {
 		fputs(" --> [Re-Accel] Writing LARGE format acx...\n", stderr);
 		//for (size_t i = 0; i < totalWords; ++i) // replace these "totalwords" things with the commented construct above
@@ -3804,13 +3704,14 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		for (size_t i = 0; i < num_k; ++i) {
 			for (uint32_t *P = F[i].Refs; P < F[i].Refs+F[i].len; P+=2) {
 				uint64_t bay = *P;
-				bay |= (uint64_t)*(P+1) << 20;
-				//count += (P+1 < (uint32_t*)Forest[i+1]) ? 5 : 3;
-				fwrite(&bay, 1, (P+1 < (uint32_t*)F[i].Refs+F[i].len) ? 5 : 3, out); 
+				if (P+1 < (uint32_t*)F[i].Refs+F[i].len) {
+					bay |= (uint64_t)*(P+1) << 20;
+					fwrite(&bay, 1, 5, out); 
+				}
+				else fwrite(&bay, 1, 3, out); 
 			}
 		}
 	}
-
 
 	fwrite(Bad, sizeof(*Bad), badSz, out);
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
@@ -4388,8 +4289,8 @@ if (DO_ACCEL) {
 				 *ScoresEX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ScoresEX)) + PADDING,
 				 *ShiftsEX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ShiftsEX)) + PADDING,
 				 *ShiftsBX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ShiftsEX)) + PADDING;
-		uint32_t *HiBound = calloc(PADDING+qdim+PADDING,sizeof(*HiBound)) + PADDING,
-				 *LoBound = calloc(PADDING+qdim+PADDING,sizeof(*LoBound)) + PADDING,
+		uint32_t *HiBound = calloc(PADDING+qdim+1+PADDING,sizeof(*HiBound)) + PADDING,
+				 *LoBound = calloc(PADDING+qdim+1+PADDING,sizeof(*LoBound)) + PADDING,
 				 *StackE = malloc(qdim*sizeof(*StackE)), // num errors
 				 *StackX = malloc(qdim*sizeof(*StackX)); // query ix in UniqQSeq
 		if (!(Matrices && ScoresEX && ShiftsEX && ShiftsBX && HiBound && LoBound && StackE && StackX)) 
@@ -4551,7 +4452,7 @@ if (DO_ACCEL) {
 						uint32_t kload = Emac*SCOUR_N + SCOUR_N, 
 							mmatch = kload < len ? len - kload : 1;
 						//uint32_t mmatch = len - Emac * SCOUR_N - SCOUR_N;
-						if (Emac == -1 || (!x && Refs[i].i <= mmatch)) { // Sb->len set to -1 in ANY mode to mark spent query
+						if (Emac == (uint16_t)-1 || (!x && Refs[i].i <= mmatch)) { // Emac to -1 in ANY mode to mark spent query
 							fp_rediv = 1; // puts("-->Skipping (mmatch)");
 							continue;
 						}
@@ -4625,7 +4526,7 @@ if (DO_ACCEL) {
 							reScoreM_mat16(rclump,Ub->Seq,rlen,len, rdim, ScoresEX, ShiftsEX,
 								ShiftsBX, min, pclump,&MPK);
 							for (int z = 0; z < VECSZ; ++z) { 
-								if (mins.u8[z] > min) continue; // skip non-mins
+								if (mins.u8[z] > min  || ri*VECSZ + z >= totR) continue; // skip non-mins
 								ResultPod *tmp = malloc(sizeof(*tmp));
 								tmp->next = Pods[ai]; 
 								tmp->mismatches = mins.u8[z];
@@ -4759,8 +4660,8 @@ if (DO_ACCEL) {
 				 *ScoresEX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ScoresEX)) + PADDING,
 				 *ShiftsEX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ShiftsEX)) + PADDING,
 				 *ShiftsBX = malloc((PADDING+2*rdim+PADDING)*sizeof(*ShiftsEX)) + PADDING;
-		uint32_t *HiBound = calloc(PADDING+qdim+PADDING,sizeof(*HiBound)) + PADDING,
-				 *LoBound = calloc(PADDING+qdim+PADDING,sizeof(*LoBound)) + PADDING,
+		uint32_t *HiBound = calloc(PADDING+qdim+1+PADDING,sizeof(*HiBound)) + PADDING,
+				 *LoBound = calloc(PADDING+qdim+1+PADDING,sizeof(*LoBound)) + PADDING,
 				 *StackE = malloc(qdim*sizeof(*StackE)), // num errors
 				 *StackX = malloc(qdim*sizeof(*StackX)); // query ix in UniqQSeq
 		for (int j = 0; j < (cacheSz+2); ++j) Matrices[j*rdim].v = _mm_set1_epi8(MIN(j*GAP,255));
@@ -4806,7 +4707,7 @@ if (DO_ACCEL) {
 				//printf("[%u,qi=%u] UniqDiv = %u, err = %u\n",j,qi,UniqDiv[qi], UniqQed[qi]);
 				
 				uint32_t Emac = Sb->ed; //UniqQed[ai];
-				if (Emac == -1) {
+				if (Emac == (uint16_t)-1) {
 					fp_rediv = 1;
 					continue;
 				}
@@ -4877,13 +4778,15 @@ if (DO_ACCEL) {
 					else reScoreM_mat16(rclump,Ub->Seq,rlen,len, rdim, ScoresEX, ShiftsEX,
 						ShiftsBX, min, pclump,&MPK);
 					for (int z = 0; z < VECSZ; ++z) { 
-						if (mins.u8[z] > min) continue; // skip non-mins
+						if (mins.u8[z] > min || ri*VECSZ + z >= totR) continue; // skip non-mins
+						// TODO: force quit if ri*VECSZ + z >= totR!
 						ResultPod *tmp = malloc(sizeof(*tmp));
 						tmp->next = Pods[ai]; 
 						
 						tmp->mismatches = mins.u8[z];
 						tmp->score = MPK.score[z]; //-1.f; // placeholder
-						tmp->refIx = ri * VECSZ + z;
+						tmp->refIx = ri * VECSZ + z; 
+
 						tmp->finalPos = MPK.finalPos[z];
 						tmp->numGapR = MPK.numGapR[z];
 						tmp->numGapQ = MPK.numGapQ[z];
@@ -4960,6 +4863,7 @@ if (DO_ACCEL) {
 	//if (totSkipped) printf("NumSkipped = %llu (%f)\n",
 	//	totSkipped,(double)totSkipped/((double)numUniqQ*numRclumps));
 	if (!RefIxSrt && RefDedupIx) {
+		printf("Constructing RefIxSrt from RefDedupIx...[totR %u, orig %u]\n",totR,RefDat.origTotR);
 		RefIxSrt = malloc(totR * sizeof(*RefIxSrt));
 		if (!RefIxSrt) {fputs("OOM:[DA]RefIxSrt\n",stderr); exit(3);}
 		for (uint32_t i = 0; i < totR; ++i) RefIxSrt[i] = TmpRIX[RefDedupIx[i]];
@@ -4974,11 +4878,11 @@ if (DO_ACCEL) {
 
 	free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
 	free(SeqDumpRC); // free a part of the query memory
-
 	// Remove duplicate alignments
 	uint32_t *RefMap = RefDat.RefMap;
 	if (!RefMap) {
-		RefMap = malloc(totR*sizeof(*RefMap));
+		puts("Constructing RefMap...");
+		RefMap = malloc((totR > RefDat.origTotR ? totR : RefDat.origTotR)*sizeof(*RefMap));
 		if (!RefMap) {fputs("OOM:RefMap\n",stderr); exit(3);}
 		RefDat.numRefHeads = RefDat.totR;
 		for (uint64_t i = 0; i < totR; ++i) RefMap[i] = i;
@@ -4993,6 +4897,8 @@ if (DO_ACCEL) {
 			for (uint32_t i = 0; i < numUniqQ; ++i) {
 				ResultPod *rp = BasePod[i], *prev = 0, *next;
 				while (rp) {
+					//if (RefIxSrt[rp->refIx] >= totR) printf("Warning: %u >= %u!\n",RefIxSrt[rp->refIx],totR);
+					//if (rp->refIx >= totR) printf("Warning: %u >= %u! [err %u]\n",rp->refIx,totR,rp->mismatches);
 					uint32_t rix = RefIxSrt[rp->refIx],
 					map = RefMap[rix],
 					mOff = RefStart ? RefStart[rix] : 0,
@@ -5097,6 +5003,7 @@ if (DO_ACCEL) {
 		}
 	}
 	else if (RUNMODE == FORAGE) { // all valid alignments
+		printf("Considering %u queries.\n",numUniqQ);
 		for (uint32_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = BasePod[i];
 			while (rp) {
@@ -5121,7 +5028,12 @@ if (DO_ACCEL) {
 								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
 								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
 							}
-							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) {//PRINT_MATCH()
+								fprintf(output,"%s\t", //%s", //\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", 
+									QHead[j]); //, RefHead[rix]); //, rp->score * 100, 
+									//alLen, numMis, numGap, 1, qlen, stIxR, edIxR, 
+									//rp->mismatches,j > Offset[i]);
+							}
 						}
 					else if (taxa_parsed) {
 						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
@@ -5345,6 +5257,7 @@ int main( int argc, char *argv[] ) {
 	int makedb = 0, doDedupe = 0; // clustradius = 0, incl_whitespace = 0; 
 	char *ref_FN = 0, *query_FN = 0, *output_FN = 0, *xcel_FN = 0, *tax_FN = 0;
 	DBType dbType = QUICK;
+	RefDat.dbType = dbType;
 	printf("This is BURST ["VER"]\n");
 	if (argc < 2) PRINT_USAGE()
 	for (int i = 1; i < argc; ++i) {
@@ -5593,7 +5506,6 @@ int main( int argc, char *argv[] ) {
 			fputs("!!! WARNING: Error overridden by use of heuristic mode!\n",stderr);
 		}
 		REBASE_AMT = dShear;
-		//alignNVU(RefDat.RefSeq[0], QDat.QSeq[0], RefDat.RefLen[0], QDat.QLen[0]);
 		do_alignments(output, RefDat, QDat, usedb);
 	}
 	
