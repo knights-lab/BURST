@@ -39,14 +39,14 @@ See [Releases](https://github.com/knights-lab/burst/releases) page for precompil
 burst -r MyDB.fasta -a MyDB.acc -o MyDB.edb -d DNA -s
 ```
 
-4. Search 
+2. Search 
 
-**CAPITALIST** mode (default; report smallest set of references to explain all tied hits, also reports LCA taxonomy for each query sequence if taxonomy provided with `-b MyDB.tax`):
+The default search mode, CAPITALIST, reports the smallest set of references necessary to explain all tied hits:
 ```
 burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb
 ```
 
-or, if you have a tab-delimited taxonomy file where the first column contains the entire sequence headers (including comments) of each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy:
+It also reports LCA taxonomy for each query sequence if taxonomy provided with `-b MyDB.tax` (a tab-delimited taxonomy file where the first column contains the entire sequence header for each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy):
 
 ```
 burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
