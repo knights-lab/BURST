@@ -46,7 +46,7 @@ The default search mode, CAPITALIST, reports the smallest set of references nece
 burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb
 ```
 
-Note that burst could also report LCA taxonomy for each query sequence if taxonomy is provided with `-b MyDB.tax` (a tab-delimited taxonomy file where the first column contains the entire sequence header for each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy). In this case the command above becomes:
+Note that burst can also report LCA taxonomy for each query sequence if taxonomy is provided with `-b MyDB.tax` (a tab-delimited taxonomy file where the first column contains the entire sequence header for each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy). In this case the command above becomes:
 
 ```
 burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
@@ -61,14 +61,6 @@ burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m BEST -b MyDB.tax
 ```
 burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m ALLPATHS -b MyDB.tax
 ```
-
-
-or, if you have a tab-delimited taxonomy file where the first column contains the entire sequence headers (including comments) of each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy:
-
-```
-burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
-```
-
 
 
 ### Fastest (longer, more detailed version):
