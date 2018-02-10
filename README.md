@@ -34,97 +34,62 @@ See [Releases](https://github.com/knights-lab/burst/releases) page for precompil
 `burst -r myRefs.fasta -q myQueries.fasta -o myAlignments.b6`
 
 ### Fastest (short version):
-1. Create initial database
+1. Create database
 ```
-burst -r MyDB.fasta -a MyDB.acc -o MyDB.edb -f -d -s
-```
-2. Run again to convert acc to smaller acx format
-```
-burst -r MyDB.edb -a MyDB.acc -o /dev/null
-```
-3. Run again to convert edb to edx format. Also remove unneeded acc and edb files.
-```
-burst -r MyDB.edb -o /dev/null
-rm RefDB.acc RefDB.edb
+burst -r MyDB.fasta -a MyDB.acc -o MyDB.edb -d DNA -s
 ```
 
 4. Search 
 
-**BEST** mode (report first best hit):
+**CAPITALIST** mode (default; report smallest set of references to explain all tied hits, also reports LCA taxonomy for each query sequence if taxonomy provided with `-b MyDB.tax`):
 ```
-burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx
+burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb
 ```
 
 or, if you have a tab-delimited taxonomy file where the first column contains the entire sequence headers (including comments) of each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy:
 
 ```
-burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
 ```
 
-**CAPITALIST** mode (recommended; report smallest set of references to explain all tied hits, also reports LCA taxonomy for each query sequence):
+**BEST** mode (report first best hit):
 ```
-burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx -m CAPITALIST -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m BEST -b MyDB.tax
 ```
 
 **ALLPATHS** mode (larger output file; report all ties for best hit for every query sequence):
 ```
-burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx -m CAPITALIST -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m ALLPATHS -b MyDB.tax
 ```
-
 
 
 or, if you have a tab-delimited taxonomy file where the first column contains the entire sequence headers (including comments) of each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy:
 
 ```
-burst -q myQueries.fasta -a MyDB.acx -f -n -r MyDB.edx -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
 ```
 
 
 
 ### Fastest (longer, more detailed version):
-1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d QUICK 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d QUICK 125" and "-i 0.98" instead.*
-2. Run `burst -r MyDB.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97` to generate a database. Run again to convert edb file to newer edx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edb`, and then again to convert acc file to newer acx format: `burst -q myQueries.fasta -a MyDB.acc -f -n -r MyDB.edx`; then delete the unneeded acc and edx files: `rm MyDB.acc MyDB.edb`.
-3. (optional, advanced) To refine the database, when clustering and DB generation finishes, note the number of empties on the line "There are _ links (_._) and _ empties (0.XXXX)". If the proportion of empty clusters 0.XXX is higher than 0.33, you might want to raise the clustering radius higher than the chosen default X indicated on the line "Average coverage (atomic) = _._, cluster radius: X". Doubling it would be a good start. Conversely, if you have insufficient memory to cluster, consider reducing the cluster radius or starting with something low like 3.
-4. Use the database for all future alignments: `burst -r MyDB.edb -q MyQueries.fasta -o myAlignments.b6 -f`
+1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d DNA 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d DNA 125" and "-i 0.98" instead.*
+2. Run `burst -r MyDB.fasta -d DNA 320 -o MyDB.edb -a MyDB.acc -s 1 -i 0.97` to generate a database and accelerator. 
+3. (optional, advanced) To refine the database, you can specify `-f` when building to enable fingerprint clustering. Conversely, if you have insufficient memory to make a database using `-d DNA`, consider using `-dp 2` or higher (partitions ease memory use) or use the non-compressive database mode `-d QUICK`.
+4. Use the database for all future alignments: `burst -r MyDB.edb -a MyDB.acc -q MyQueries.fasta -o myAlignments.b6`
 
 Other alignment modes, taxonomy parsing, tie-reporting, etc:
-- Using "-m CAPITALIST" enables unique-reference minimization (reducing the number of unique references hit; useful for OTU picking or taxonomy assignment). 
+- Using "-m CAPITALIST" (the default) enables unique-reference minimization (reducing the number of unique references hit; useful for OTU picking or taxonomy assignment). 
+- Using "-m BEST" produces the single highest BLAST-id alignment possible in the database, breaking ties by choosing the very first occurrence (in input order) within the original input fasta database. 
+  - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
 - Using "-m ALLPATHS" reports all tied best-hit alignments above the chosen identity threshold. 
   - It is up to the user to parse the resulting alignments in a meaningful way, such as running EM interpolation on the possibilities, informing a more intelligent, optimal "MAPQ"-like score, resolving coverage ambiguities in downstream programs, etc
 - Using "-m FORAGE" reports all alignments, best or otherwise, that exist under the chosen identity threshold.
   - This is like ALLPATHS but doesn't just report the ties. It reports *everything* below the threshold. Use for primer identification, variable region sleuthing, exhaustive enumeration of all possible sequence-level relationships among organisms, running the input queries as their own references to use as a distance matrix, etc.
 - Using "-b taxonomy.txt" along with "-m CAPITALIST" enables optimal LCA (lowest common ancestor) taxonomy assignment. 
   - The taxonomy file is a simple file with two columns separated by tab. The first column contains the name of a reference in the references, and the second contains its corresponding taxonomy (or other hierarchical assignment), with levels separated by semicolon. 
-  - You can assign taxonomy more conservatively or speculatively by changing the --taxacut (-bc) parameter. Lower values are more speculative, higher values are more conservative. 
-- The default alignment mode, BEST, produces the single highest BLAST-id alignment possible in the database, breaking ties by choosing the very first occurrence (in input order) within the original input fasta database. 
-  - This has interesting implications if there is meaning to the order of the references (ordered by increasing taxonomic specificity or sequence abundance in another sample or a depth-first traversal of a clustogram). Otherwise it ensures consistency of best hit for the same input sequence.  
+  - You can assign taxonomy more conservatively or speculatively by changing the --taxacut (-bc) parameter. Lower values are more speculative, higher values are more conservative. (You may also provide a confidence to --taxacut directly, e.g. --taxacut 0.85)
+- Use "-y" during database creation and subsequent alignment to disable penalizing the base 'N' in queries and references. 
 
-### Dan's Faves
-Note: Please be sure to use -n in most cases to penalize matching to Ns and ambiguous bases. Otherwise, depending on your database, everthing may hit reads with long stretches of Ns in them. The following examples work with Greengenes representative cluster sequences (rep_set). 
-
-- [Build a database](#fastest-step-1-create-database-step-2-use-database-for-alignments) (optional, you can also search against raw fasta but this is faster)
-
-`burst -r 97_otus.fasta -d QUICK 320 -o MyDB.edb -f -s 1 -i 0.97`
-
-- Pick optimal (always best match, no reporting of ties) OTUs for 16S data against db
-
-`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n`
-
-- Pick optimal (always best match) OTUs for 16S data against db, and find the minimal set of OTUs that can explain the many many ties for best matches. Also report the fully resolved LCA taxonomy for each set of ties! (Cleaned-up universal taxonomy file for any Greengenes level can be found in [Releases](https://github.com/knights-lab/burst/releases).)
-
-`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST`
-
-- As in previous but require only 80% agreement for LCA taxonomy calling (the "5" means 1 in 5 can disagree and be ignored). This will dramatically increase the number of species calls, for example.
-
-`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m CAPITALIST --taxacut 5`
-
-- Get a report of all ties for best match for every query. Get ready for a large output file.
-
-`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m ALLPATHS`
-
-- Like previous (ALLPATHS) but now reports all matches above the identity threshold (here 98% for example) for every query.
-
-`burst -r 97_otus.edb -q seqs.fna -o burst99g.txt -n --taxonomy taxonomy.txt -m FORAGE -i .98`
 
 ## Where
 Output alignments are stored in the resulting .b6 file. This is a tab-delimited text file in [BLAST-6 column format](http://www.drive5.com/usearch/manual/blast6out.html). Columns 11 and 12 instead refer to total edit distance (number of differences between query and reference in total) and whether the query is an exact duplicate of the query above it (1 if so), respectively. If taxonomy is assigned (-m CAPITALIST -b taxonomy.txt), that particular read's (interpolated if CAPITALIST) taxonomy is reported in column 13. 
@@ -153,6 +118,8 @@ Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing
 
 5. *Other program(s) give me more alignments; how can you say this is optimal?:*
 First, more alignments doesn't mean correct alignments. Second, be careful when comparing technologies; BURST is a short-read aligner. It does not do local alignment like "BLAST" and hence does not do soft-trimming -- this is very much intentional and part of ensuring optimality of end-to-end alignments. An alignment of identity 97% spanning 97% of a query means that query is actually 97% x 97% = ~94% identical to its matched reference throughout. 
+
+6. *It won't compile!* It is not recommended to compile this software yourself unless you have the Intel compiler and a lot of patience for profile-guided optimization using multi-pass compilation. Your binary probably won't be as fast as the one provided on the release page. If you nonetheless insist, you must use ICC or GNU GCC (NOT Apple/LLVM CLANG) and provide the additional compiler flag `-march=corei7` (or newer) and `-fwhole-program -O3` (or `-Ofast`)
 
 ## Cite
 Al-Ghalith, Gabriel and Dan Knights. BURST enables optimal exhaustive DNA alignment for big data. DOI 2017:doi.org/10.5281/zenodo.806850
