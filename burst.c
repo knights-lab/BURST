@@ -2,7 +2,7 @@
 Copyright (C) 2015-2018 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.7d"
+#define VER "v0.99.7f"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -127,6 +127,7 @@ long REBASE_AMT = 500, DB_QLEN = 500;
 	printf("--prepass (-p) [speed]: use ultra-heuristic pre-matching\n"); \
 	printf("  [speed]: Optional. Integer, maximum search effort [16]\n"); \
 	printf("--heuristic (-hr): allow relaxed comparison of low-id matches\n"); \
+	printf("--noprogress: suppress progress indicator\n"); \
 	/*printf("--cache (-c) <int>: Performance tweaking parameter [%d]\n",cacheSz); */ \
 	/* printf("--latency (-l) <int>: Performance tweaking parameter [%d]\n",LATENCY); */ \
 	/*printf("--clustradius (-cr) <int>: Performance tweaking parameter [auto]\n");*/ \
@@ -279,7 +280,7 @@ typedef struct {
 	char **QHead, *SeqDumpRC; 
 	uint32_t totQ, numUniqQ, maxLenQ, *Offset, *QBins, 
 		maxED, maxDiv, minLenQ;
-	int incl_whitespace, taxasuppress, rc, skipAmbig;
+	int incl_whitespace, taxasuppress, rc, skipAmbig, quiet;
 
 	PackaPrince FingerprintsQ;
 	UniBin *UniBins;
@@ -510,7 +511,7 @@ size_t parse_tl_fasta_db(char *ref_FN, char ***HeadersP, char **SeqsP,
 		switch (*line) {
 			case '>': // We could be in the (a) header.
 				if (lastHd) break;
-				if (ns++ == cur_sz) { // double all data structures
+				if (++ns == cur_sz) { // double all data structures
 					cur_sz += cur_sz;
 					Headers = realloc(Headers, cur_sz*sizeof(*Headers));
 					Offsets = realloc(Offsets, cur_sz*sizeof(*Offsets));
@@ -1121,20 +1122,6 @@ inline uint32_t aded_mat16L(DualCoil *ref, char *query, uint32_t rwidth, uint32_
 	*LoBound = -1; 
 	return _mm_extract_epi8(b,0); /* save min of mins as new bound */ 
 }
-/*inline uint32_t aded_mat16LW(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, uint32_t minlen, 
- DualCoil *Matrix, DualCoil *profile, uint32_t maxED, uint32_t startQ, uint32_t *LoBound, uint32_t *HiBound, DualCoil *MinA) {
-	uint32_t min;
-	if (maxED <= 2) min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
-		Matrix, profile, maxED, startQ, LoBound, HiBound, MinA);
-	else {
-		uint32_t er = maxED >> 1;
-		min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
-			Matrix, profile, er, startQ, LoBound, HiBound, MinA);
-		if (min == -1) min = aded_mat16L(ref, query, rwidth, qlen, width, minlen, 
-			Matrix, profile, maxED, startQ > er+1 ? startQ : er+1, LoBound, HiBound, MinA);
-	}
-	return min;
-}*/
 
 inline void translateNV(char* string, size_t len) { // makes string into nums
 	for (size_t i = 0; i < len; ++i) string[i] = CHAR2NUM[string[i]]; }
@@ -1832,9 +1819,10 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 					if (len < shear16p5) continue;
 					len -= shear16p5;
 					for (uint32_t j = 0; j <= len; ++j) {
-						char *s = so + j;
-						for (int k=0; k<NL; ++k) if (s[k] > 4) goto L4_P6;
+						uint8_t *s = so + j;
+						for (int k=0; k<NL; ++k) if (!s[k] || s[k] > 4) goto L4_P6;
 						uint32_t nib = NIB;
+						//if (nib >= NLB) printf("WARNING: nib %u >= max %u!\n",nib,NLB);
 						#pragma omp atomic update
 						++Bcount[nib]; 
 						L4_P6:NULL;
@@ -1861,8 +1849,8 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 					if (len < shear16p5) continue;
 					len -= shear16p5;
 					for (uint32_t j = 0; j <= len; ++j) {
-						char *s = so + j;
-						for (int k=0; k<NL; ++k) if (s[k] > 4) goto L4_P7;
+						uint8_t *s = so + j;
+						for (int k=0; k<NL; ++k) if (!s[k] || s[k] > 4) goto L4_P7;
 						uint32_t nib = NIB;
 						uint64_t ix;
 						#pragma omp atomic capture
@@ -2006,12 +1994,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 					newRefLen[ix] = end - RefStart[ix];
 					//if (!i) printf("Shear %u: start %u [%u] -> bstpos %u end %u [%u]\n", ix, RefStart[ix],bstFlgO,bstFlgPos,end,bstFlg);
 				}
-
-				// OLD
-				//long unit = (long)RefLen[i] - (long)ov;
-				//unit = unit < 0 ? 1 : unit;
-				//for (uint32_t j = 0; j < unit; j+= shear) 
-				//	ReRefIx[x] = i, RefStart[x++] = j;
 			}
 			printf("Rebased [%u orig] --> [%u rebase] --> [%u adj]\n",origR,numRrebase/2,x);
 			
@@ -3672,13 +3654,8 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	printf("Total accelerants stored: %llu (%u bad)\n",totalWords, badSz);
 
 	// redux
-	// first calculate max
 	
-	uint32_t max = totR > origTotR ? totR : origTotR;
-
-	//for (uint32_t i = 0; i < num_k; ++i) max = F[i].
-
-	uint8_t vers = (1 << 7) | (Z << 6) | (max > 1048574 ? ACC_VERSION_BIG : ACC_VERSION);//vers = (1 << 7) | (Z << 6) | SCOUR_N;
+	uint8_t vers = (1 << 7) | (Z << 6) | (totRC > 1048574 ? ACC_VERSION_BIG : ACC_VERSION);//vers = (1 << 7) | (Z << 6) | SCOUR_N;
 	setvbuf(out,0,_IOFBF,1<<21);
 	fwrite(&vers,sizeof(vers),1,out);
 	fwrite(&badSz, sizeof(badSz), 1, out);
@@ -3689,8 +3666,8 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	//for (uint32_t i = 0; i < num_k; ++i) 
 	//	fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
 	//uint64_t count = 0;
-	if (max > 16777214) {fputs("ERROR: acc error M16\n",stderr); exit(101);}
-	else if (max > 1048574) {
+	if (totRC > 16777214) {fputs("ERROR: acc error M16\n",stderr); exit(101);}
+	else if (totRC > 1048574) {
 		fputs(" --> [Re-Accel] Writing LARGE format acx...\n", stderr);
 		//for (size_t i = 0; i < totalWords; ++i) // replace these "totalwords" things with the commented construct above
 		//	fwrite(WordDump + i*sizeof(uint32_t), 3, 1, out);
@@ -3849,6 +3826,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 	int taxasuppress = QDat.taxasuppress, doRC = QDat.rc, skipAmbig = QDat.skipAmbig;
 	uint32_t *BadList = RefDat.BadList, szBL = RefDat.badListSz, *QBins = QDat.QBins;
 	void **Forest = RefDat.Accelerators;
+	int quiet = QDat.quiet;
 
 	// Prepare dimensions, bounds
 	uint32_t qdim = maxLenQ + 1, rdim = maxLenR + 1;
@@ -4204,9 +4182,10 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 					}
 				}
 				
-				if (!tid && doneQ >= critQ) 
-					critQ = doneQ + quantQ,
-					printf("Progress: %.3f%%\r",(double)doneQ*rUniqQ);
+				if (!tid && doneQ >= critQ) {
+					critQ = doneQ + quantQ;
+					if (!quiet) printf("Progress: %.3f%%\r",(double)doneQ*rUniqQ);
+				}
 			}
 			free(Matrices);
 			free(Hash);
@@ -4583,7 +4562,7 @@ if (DO_ACCEL) {
 				RefPtr = 0;
 				nref = szBL;
 			}
-			if (!tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone * totQMult);
+			if (!quiet && !tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone * totQMult);
 			
 			#pragma omp atomic
 			totDone += (bound - z);
@@ -4643,7 +4622,7 @@ if (DO_ACCEL) {
 		free(ThreadPods[i]);
 	}*/
 	//printf("\rSearch Progress: [100.00%%]\n");
-	printf("\rSearch Progress: [%3.2f%%]\n",100.0 * (double)totDone * totQMult); // not necessarily 100.0%!
+	if (!quiet) printf("\rSearch Progress: [%3.2f%%]\n",100.0 * (double)totDone * totQMult); // not necessarily 100.0%!
 	free(*Forest); free(Forest); free(BadList); // NEW [mem]
 } // end ACCEL
 
@@ -4817,7 +4796,7 @@ if (DO_ACCEL) {
 			#pragma omp atomic
 			++totDone;
 			tid = omp_get_thread_num();
-			if (!tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone / numRclumps);
+			if (!quiet && !tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone / numRclumps);
 		}
 		ThreadPods[omp_get_thread_num()] = Pods;
 		free(HiBound); free(LoBound); free(StackE); free(StackX); free(Matrices);
@@ -4854,7 +4833,7 @@ if (DO_ACCEL) {
 		}
 		free(ThreadPods[i]);
 	}
-	printf("\rSearch Progress: [100.00%%]\n");
+	if (!quiet) printf("\rSearch Progress: [100.00%%]\n");
 	EOA:NULL;
 	
 	if (RUNMODE == ANY) return;
@@ -5028,12 +5007,7 @@ if (DO_ACCEL) {
 								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
 								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
 							}
-							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) {//PRINT_MATCH()
-								fprintf(output,"%s\t", //%s", //\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", 
-									QHead[j]); //, RefHead[rix]); //, rp->score * 100, 
-									//alLen, numMis, numGap, 1, qlen, stIxR, edIxR, 
-									//rp->mismatches,j > Offset[i]);
-							}
+							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 						}
 					else if (taxa_parsed) {
 						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
@@ -5422,6 +5396,11 @@ int main( int argc, char *argv[] ) {
 			DO_HEUR = 1; // global
 			printf(" --> WARNING: Heuristic mode set; optimality not guaranteed at low ids\n");
 		}
+		//
+		else if (!strcmp(argv[i],"--noprogress")) {
+			QDat.quiet = 1;
+			printf(" --> Surpressing progress indicator\n");
+		}
 		else if (!strcmp(argv[i],"--cache") || !strcmp(argv[i],"-c")) {
 			if (++i == argc || argv[i][0] == '-') 
 				{ puts("ERROR: --cache requires integer argument"); exit(1);}
@@ -5506,6 +5485,7 @@ int main( int argc, char *argv[] ) {
 			fputs("!!! WARNING: Error overridden by use of heuristic mode!\n",stderr);
 		}
 		REBASE_AMT = dShear;
+		//alignNVU(RefDat.RefSeq[0], QDat.QSeq[0], RefDat.RefLen[0], QDat.QLen[0]);
 		do_alignments(output, RefDat, QDat, usedb);
 	}
 	
