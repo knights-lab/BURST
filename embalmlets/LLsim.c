@@ -1,13 +1,15 @@
-#define USAGE "Usage: LLsim input.lin.fna output.fna <numReads> <readLen> <numErrors>"
-#define VERSION "0.92"
+#define USAGE "Usage: LLsim input.lin.fna output.fna <numReads> <readLen> <numErrors> [seed] [RC]"
+#define VERSION "0.92LG"
 /* LLsim: High-performance short read simulator w/specified number of errors per read.
    INPUT: linearized FASTA file (alternating header and sequence)
    OUTPUT: FASTA of simulated reads with specified number of errors
    ARGS: numReads: how many reads to simulate from the references. 
          readLen: how long each read has to be (BEFORE potential additions/deletions)
 		 numErrors: how many errors to introduce in the read relative to the reference
+		 seed (optional): set the random seed (if omitted, will use UNIX time)
+		 RC (optional): if 'RC' specified, reverse-complement ~50% of generated reads
 */
-// Note to Gabe: Add this to help string!
+// Note to Gabe: Add these descriptions to a help (-h) string!
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -86,13 +88,17 @@ static Ix_Off_pair uWBS(uint64_t *ixList, uint64_t key, uint64_t range) {
 /* The brunt of the work happens in the main function. The required arguments are
    the commandline options specified in the usage information at the top of this file */
 int main(int argc, char *argv[]) {
-	puts("This is LLsim ["VERSION"] by Gabe and Lia");
+	puts("This is LLsim [v"VERSION"] by Gabe and Lia");
 	if (argc < 6) {puts(USAGE); exit(1);} // All arguments are required. See USAGE at top
 	int numReads = atol(argv[3]), readLen = atol(argv[4]), numE = atol(argv[5]);
 	if (numReads < 1 || readLen < 1 || numE < 0 || numE > readLen) {
 		printf("Invalid read parameters: num %d, len %d, err %d\n",numReads,readLen,numE);
 		exit(1);
 	}
+	int RC = argc > 6 && !strcmp(argv[argc-1],"RC");
+	if (RC) --argc, puts("Also simulating reverse complemented reads.");
+	uint64_t seed = argc > 6 ? atol(argv[6]) : time(0); // set random seed
+	printf("Setting random seed to %llu\n",seed);
 	
 	// Prepare to directly read page table on disk. "struct stat" and "read" are 
 	// POSIX opcalls. They work on all major operating systems.
@@ -154,10 +160,12 @@ int main(int argc, char *argv[]) {
 	MUT[20]= (uint8_t[]){'A','C','G'}; //T
 	MUT[21]= (uint8_t[]){'A','C','G'}; //U
 
-	// Goal: simulate random number out of the valid bases, get ref and ix in it
-	// If subsequence is valid (long enough, unambiguous), simulate from it, else reject
-	// Note to Gabe: consider domain restriction instead of rejection sampling [TODO]
-	uint64_t seed = 1; // TODO: Replace this with time(0) in production code?
+	char RL[32] = {0}; // Prepare reverse complment lookup table
+	RL['A'&31]='T', RL['C'&31]='G', RL['G'&31]='C', RL['T'&31]='A', RL['U'&31]='A';
+
+	/* Goal: simulate random number out of the valid bases, get ref and ix in it
+	   If subsequence is valid (long enough, unambiguous), simulate from it, else reject */
+	// Note to Gabe: consider domain restriction instead of rejection sampling [TODO] 
 	Ix_Off_pair loc;   // this will hold the found index and offset into the reference
 	char *sr = calloc(2*readLen+1,1); // guarantee enough space for max (all-ins) expansion
 	uint32_t *mIX = malloc(readLen*sizeof(*mIX)), *mShf = malloc(readLen*sizeof(*mShf));
@@ -183,17 +191,16 @@ int main(int argc, char *argv[]) {
 		// Note to Gabe: avoid expensive qsort syscall with sort network
 		// ... or avoid sorting altogether in favor of select-N (small num E's)
 		
-		// Types of mutation: substitution, insertion, deletion. 
+		// Introduce mutations (substitution, insertion, deletions). 
 		// Randomly determine each mutation type by index 0-4. 
-		// 0-2 = substitute. 3 = insert, 4 = delete
+		// 0-2 = substitute via SUB[0-2]; 3 = insert random base; 4 = delete
 		uint32_t qix = 0, mix = 0, ni = 0, nd = 0; 
-		char *qp = Seqs[loc.ix] + loc.off, typeS; // store ref pointer
+		char *qp = Seqs[loc.ix] + loc.off, typeS; // store reference seq pointer
 		fwrite(Heads[loc.ix],1,Seqs[loc.ix]-Heads[loc.ix]-1,out); // write header
-		//fprintf(out, ">%u [%u]", loc.ix, loc.off);
 		fprintf(out, " @%u: ",loc.off+1); // embed original location into header
 		fwrite(qp,1,readLen,out);         // also embed original sequence itself
 		fprintf(out, " ");
-		int li = 0, ld = 0;
+		int li = 0, ld = 0;               // indicates whether last error was indel
 		for (uint32_t j = 0; j < numE; ++j) {
 			// Copy in all bases up to the current error index
 			for (; qix + ni < mShf[j]; ++qix) 
@@ -209,16 +216,24 @@ int main(int argc, char *argv[]) {
 				sr[mix++] = MUT[0][LLRand64(&seed) % 4];
 			fprintf(out, "%c%u", typeS, mShf[j]);   // add mutation type+loc to header
 		}
-		for (; qix < readLen; ++qix)    // copy in all bases after last edit index
+		for (; qix < readLen; ++qix)       // copy in all bases after last edit index
 			sr[mix++] = qp[qix];
-		fprintf(out, "\n");             // move to sequence line
-		fwrite(sr,1,readLen+ni-nd,out); // dump sequence
+		int seqLen = readLen + ni - nd; char c;
+		if (RC && (LLRand64(&seed) % 2)) { // reverse complement read in-place
+			for (int j = 0; j < seqLen >> 1; ++j) // pivot at centerpoint
+				c = RL[sr[j] & 31],               // look up and store right base
+				sr[j] = RL[sr[seqLen-j-1] & 31],  // look up and store left base
+				sr[seqLen-j-1] = c;               // complete swap of left, right
+			if (seqLen & 1) sr[seqLen >> 1] = RL[sr[seqLen >> 1] & 31]; // handle odds
+			fprintf(out," [RC]");          // indicate rev. comp'd in header
+		}
+		fprintf(out, "\n");                // move to sequence line
+		fwrite(sr,1,seqLen,out);           // dump sequence
 		fprintf(out,"\n");
 	}
 }
 
 /* TODO: 
 1. Add proper help menu (and real commandline parser) [easy]: 0%
-2. Add ability to perform RC [trivial]: 0%
 3. Detect and filter cases where errors nullify each other [hard]: 50%
 */
