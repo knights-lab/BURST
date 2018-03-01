@@ -36,38 +36,38 @@ See [Releases](https://github.com/knights-lab/burst/releases) page for precompil
 ### Fastest (short version):
 1. Create database
 ```
-burst -r MyDB.fasta -a MyDB.acc -o MyDB.edb -d DNA -s
+burst -r MyDB.fasta -a MyDB.acx -o MyDB.edx -d DNA -s
 ```
 
 2. Search 
 
 The default search mode, CAPITALIST, reports the smallest set of references necessary to explain all tied hits:
 ```
-burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx
 ```
 
 Note that burst can also report LCA taxonomy for each query sequence if taxonomy is provided with `-b MyDB.tax` (a tab-delimited taxonomy file where the first column contains the entire sequence header for each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy). In this case the command above becomes:
 
 ```
-burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -b MyDB.tax
 ```
 
 **BEST** mode (report first best hit):
 ```
-burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m BEST -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m BEST -b MyDB.tax
 ```
 
 **ALLPATHS** mode (larger output file; report all ties for best hit for every query sequence):
 ```
-burst -q myQueries.fasta -a MyDB.acc -r MyDB.edb -m ALLPATHS -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m ALLPATHS -b MyDB.tax
 ```
 
 
 ### Fastest (longer, more detailed version):
 1. Decide on the maximum lengths your queries will be, and the minimum identity you require of qualifying alignments. For example, for max query length of 320 bases and minimum identity of 0.97 (97%), you'd pass "-d DNA 320" and "-i 0.97" like below. *Note: databases assuming shorter maximum query length and higher minimum identities will run faster. If you only have HiSeq 125-bp data and you're only interested in alignments of 98% identity or better, you'd want to use something like "-d DNA 125" and "-i 0.98" instead.*
-2. Run `burst -r MyDB.fasta -d DNA 320 -o MyDB.edb -a MyDB.acc -s 1 -i 0.97` to generate a database and accelerator. 
+2. Run `burst -r MyDB.fasta -d DNA 320 -o MyDB.edx -a MyDB.acx -s 1 -i 0.97` to generate a database and accelerator. 
 3. (optional, advanced) To refine the database, you can specify `-f` when building to enable fingerprint clustering. Conversely, if you have insufficient memory to make a database using `-d DNA`, consider using `-dp 2` or higher (partitions ease memory use) or use the non-compressive database mode `-d QUICK`.
-4. Use the database for all future alignments: `burst -r MyDB.edb -a MyDB.acc -q MyQueries.fasta -o myAlignments.b6`
+4. Use the database for all future alignments: `burst -r MyDB.edx -a MyDB.acx -q MyQueries.fasta -o myAlignments.b6`
 
 Other alignment modes, taxonomy parsing, tie-reporting, etc:
 - Using "-m CAPITALIST" (the default) enables unique-reference minimization (reducing the number of unique references hit; useful for OTU picking or taxonomy assignment). 
@@ -103,7 +103,7 @@ This is likely a bug with BURST! Please contact me with no less than the followi
   - The exact command-line used to run the program
   - The version of emalmer used (run with -h to see help)
   - The operating system and amount of RAM (memory) in the computer running it
-  - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edb), include the fasta file used to produce the DB. 
+  - A minimalistic example of input and output to reproduce the problem. If it occurs using a DB (.edx), include the fasta file used to produce the DB. 
 
 4. *I get no alignments with my amplicon reads, even though I know they're legit:*
 Try reverse complementing (`-fr`). If that doesn't work, try removing sequencing platform adaptors and cleaning up and trimming the reads with [a QC pipeline](https://github.com/knights-lab/shi7). 
