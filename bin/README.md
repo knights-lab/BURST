@@ -34,5 +34,5 @@ cd ..
 `for f in *.fna.gz; do echo "${f/.fna.gz/}"; done | grep -F -f - assembly_summary.txt | cut -f 1,6,7,8 | sort -k2,2 > rawtax.tax`
 
 ## Get GG string for each taxon
-`join -t $'\t' -12 -21 -e0 -o'1.1,2.2,1.4,0,1.3' rawtax.srt.tax taxtmp/tid2gg.srt.txt | sort -k2 > alltax.txt`
+`join -t $'\t' -12 -21 -e0 -o'1.1,2.2,1.4,0,1.3' rawtax.tax taxtmp/tid2gg.srt.txt | sort -k2 > alltax.txt`
 
