@@ -43,23 +43,23 @@ burst -r MyDB.fasta -a MyDB.acx -o MyDB.edx -d DNA -s
 
 The default search mode, CAPITALIST, reports the smallest set of references necessary to explain all tied hits:
 ```
-burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -o output.txt
 ```
 
 Note that burst can also report LCA taxonomy for each query sequence if taxonomy is provided with `-b MyDB.tax` (a tab-delimited taxonomy file where the first column contains the entire sequence header for each sequence in the original fasta file, and the second column contains semi-colon-separated taxonomy). In this case the command above becomes:
 
 ```
-burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -b MyDB.tax -o output.txt
 ```
 
 **BEST** mode (report first best hit):
 ```
-burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m BEST -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m BEST -b MyDB.tax -o output.txt
 ```
 
 **ALLPATHS** mode (larger output file; report all ties for best hit for every query sequence):
 ```
-burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m ALLPATHS -b MyDB.tax
+burst -q myQueries.fasta -a MyDB.acx -r MyDB.edx -m ALLPATHS -b MyDB.tax -o output.txt
 ```
 
 
