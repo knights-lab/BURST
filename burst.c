@@ -2,7 +2,7 @@
 Copyright (C) 2015-2018 Knights Lab, Regents of the University of Minnesota.
 This software is released under the GNU Affero General Public License (AGPL) v3.0.
 */
-#define VER "v0.99.7LL"
+#define VER "v1.0"
 #define _LARGEFILE_SOURCE_
 #define FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -12,11 +12,14 @@ This software is released under the GNU Affero General Public License (AGPL) v3.
 #include <limits.h>
 #include <stdlib.h>
 #include <time.h>
-// Ensure ability to read files > 4GB on Windows
+// Ensure ability to read files > 4GB on Windows, or mmap on Unix
 #ifdef _WIN32
 	#include <windows.h>
 	#define fseek _fseeki64
 	#define ftell _ftelli64
+#else 
+	#include <sys/stat.h>
+	#include <sys/mman.h> 
 #endif
 // OpenMP is the multi-threading protocol used by BURST
 #ifdef _OPENMP
@@ -115,7 +118,7 @@ long REBASE_AMT = 500, DB_QLEN = 500; // Stores shear length and max query lengt
 	puts("  BEST (report first best match by hybrid BLAST id)"); \
 	puts("  ALLPATHS (report all ties with same error profile)"); \
 	puts("  CAPITALIST (minimize set of references AND interpolate taxonomy) [default]"); \
-	puts("  COMMUNIST (min. ref. set, taxa interpolation, and fair redistribution)"); \
+	/* puts("  COMMUNIST (min. ref. set, taxa interpolation, and fair redistribution)"); */ \
 	puts("  FORAGE (report all matches above specified threshold)"); \
 	puts("  ANY (report any valid hit above specified threshold)"); \
 	/*puts("  [not enabled]: PAIRED, MAPPED, INLINE");*/ \
@@ -213,8 +216,8 @@ typedef struct {
 } Scores16;
 
 typedef struct {uint32_t v, i;} Split; 
-typedef struct {char *s; uint32_t ix;} StrIxPair;
-typedef struct {char *s; uint64_t ix;} StrIxPair64;
+typedef struct {char *s; uint32_t ix;} StrIxPair32;
+typedef struct {char *s; uint64_t ix;} StrIxPair;
 
 typedef struct {
 	float score[16];
@@ -234,7 +237,8 @@ typedef struct {
 	Prince *P;   // Prince
 	uint8_t *N;  // Pops
 	void *initP; 
-	uint32_t nf, *Ptrs;
+	uint64_t nf;
+	uint32_t *Ptrs;
 } PackaPrince;
 
 // One hash contains many references (accelerator lookup)
@@ -265,7 +269,7 @@ float TAXLEVELS_STRICT[] = {.65f, .75f, .78f, .82f, .86f, .94f, .98f, .995f},
 typedef struct {
 	char *Seq;    //8
 	uint16_t div; //2
-	uint32_t six; //4
+	uint64_t six; //4
 	uint8_t rc;   //1
 } UniBin; //15
 
@@ -294,13 +298,18 @@ typedef struct {
 	void **Accelerators;           // Used for constructing acx
 	DBType dbType;                 // Corresponds to second arg of '-d'
 	int cparts, skipAmbig;
+	uint64_t ForestSize;
+	
+	uint64_t RawEDB_sz, RawAcc_sz;
+	int RawEDB_fno, RawAcc_fno;
+	char *RawEDB, *RawAcc;
 } Reference_Data;
 
 // Contains all info about queries; for passing between functions
 typedef struct {
 	char **QHead, *SeqDumpRC; 
-	uint32_t totQ, numUniqQ, maxLenQ, *Offset, *QBins, 
-		maxED, maxDiv, minLenQ;
+	uint64_t totQ, numUniqQ, *Offset, *QBins;
+	uint32_t maxLenQ, maxED, maxDiv, minLenQ;
 	int incl_whitespace, taxasuppress, rc, skipAmbig, quiet;
 
 	PackaPrince FingerprintsQ;
@@ -636,7 +645,7 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 	memset(dump+sz,0,16);
 	if (*dump != '>') {fputs("ERROR: Malformatted FASTA file.\n",stderr); exit(1);}
 	wt = omp_get_wtime();
-	uint32_t numNL = 0, numLT = 0;
+	uint64_t numNL = 0, numLT = 0;
 	#pragma omp parallel for simd reduction(+:numNL,numLT)
 	for (uint64_t i = 0; i < sz; ++i) 
 		numNL += dump[i]=='\n',
@@ -660,7 +669,7 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 	uint64_t ix = 1;
 	#pragma omp parallel for
 	for (uint64_t i = (nl-dump); i < sz; ++i) if (dump[i]=='>') {
-		uint32_t tix;
+		uint64_t tix;
 		#pragma omp atomic capture
 		tix = ix++;
 		char *s = dump + i + 1;
@@ -675,7 +684,7 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 		if (*(nl - 1) == '\r') *--nl = 0;
 		Lengths[tix] = nl - s;
 	}
-	if (ix > UINT32_MAX) puts("WARNING: greater than 4 billion queries");
+	if (ix > UINT32_MAX) puts("Note: more than 4 billion queries.");
 	*HeadersP = Headers; *SeqsP = Seqs; *LengthsP = Lengths;
 	return ix;
 }
@@ -878,11 +887,11 @@ size_t parse_tl_faster(char * filename, char ***HeadersP, char ***SeqsP, uint32_
 
 // Two implementations of primary re-scoring aligner for the alphabet-sensitive
 // and alphabet agnostic cases, respectively
-inline void reScoreM_mat16(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, 
+static inline void reScoreM_mat16(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, 
  DualCoil *Matrix, DualCoil *Shifts, DualCoil *ShiftR, uint32_t maxED, DualCoil *profile, MetaPack *M16) 
 	RESCOREM_PROTYPE(DIAGSC_MAT16)
 
-inline void reScoreM_xalpha(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, 
+static inline void reScoreM_xalpha(DualCoil *ref, char *query, uint32_t rwidth, uint32_t qlen, uint32_t width, 
  DualCoil *Matrix, DualCoil *Shifts, DualCoil *ShiftR, uint32_t maxED, DualCoil *profile, MetaPack *M16) 
 	RESCOREM_PROTYPE(DIAGSC_XALPHA)
 
@@ -1326,6 +1335,7 @@ static int cpcmp(const void *a, const void *b)
 static int cmpPackLen(const void *first, const void *second) {
 	Tuxedo *a = (Tuxedo *)first, *b = (Tuxedo *)second;
 	return a->len < b->len ? -1 : a->len > b->len;
+}
 
 // Compares Tuxedo objects (sequence + length) by sequence
 static int cmpPackSeq(const void *first, const void *second) {
@@ -1346,12 +1356,14 @@ static inline uint64_t uWBS(uint64_t *ixList, uint64_t key, uint64_t maxIX) {
 }
 
 // Fingerprint: patterned Jaccard hash.
-// Add 4-mers by 2-bit hash that occur after a pattern (here, 'A'). 
+// Add 4-mers by 2-bit hash that occur after a pattern (here, nucleotide 'A'). 
 // Effectively samples every 1/4^5 bases into a 256-bit bucket by presence,
 // which can be efficiently compared to other 256-bit buckets by Jaccard.
 // Allows rough similarity clustering as well as exclusion by dissimilarity.
 // Effectively an optimal lower-bound error profiler when the references 
 // receive patterned hashing and queries receive exhaustive hashing
+// Fingerprints, while useful, are somewhat redundant with the accelerator, 
+// (ACX), and are no longer recommended.
 #define NL 4
                     //0 A C G T N K M R Y S W B V H D
 uint8_t A_COMPAT[] = {0,1,0,0,0,1,0,1,1,0,0,1,0,1,1,1}; 
@@ -1702,7 +1714,7 @@ static inline void create_sse2_profiles(Reference_Data *Rd) {
 	Rd->ProfClump = ProfClump;
 }
 
-// New -- Cucasort mk2 inplace
+// New -- in-place string comparison using assembly intrinsics
 inline int str_d_gt_0(char *A, char *B, uint32_t maxD) {
 	//for (uint32_t i = 0; i < maxD; ++i)
 	//	if (A[i] != B[i]) return A[i] > B[i];
@@ -1726,37 +1738,6 @@ inline void iSort(char **s, uint32_t N, uint32_t d, uint32_t maxD) {
 		//if (j != i)
 			//memmove(s + j + 1, s + j, sizeof(*s) * (i - j)),
 			s[j] = key;
-	}
-}
-void Cucasort(char **S, uint64_t N, uint32_t d, uint32_t maxD) {
-	// Recursive termination
-	if (N < 1 || d >= maxD) return;
-	if (N < 32) iSort(S,N,d,maxD);
-	uint64_t Bounds[16];
-	{ // define scope compartment for temp vars
-		uint64_t CacheO[17] = {0}, *Cache = CacheO + 1; //, Bounds[16];
-		for (uint64_t i = 0; i < N; ++i) 
-			++Cache[S[i][d]];
-		*Bounds = *Cache;
-		for (int i = 1; i < 16; ++i)
-			Cache[i] += Cache[i-1],
-			Bounds[i] = Cache[i]; // sep?
-		--Cache;
-		for (int i = 0; i < 16;) {
-			if (Cache[i] >= Bounds[i]) {++i; continue;}
-			char *cur = S[Cache[i]], *t;
-			while (cur[d] != i)  // sync needed
-				t = S[Cache[cur[d]]],
-				S[Cache[cur[d]]++] = cur,
-				cur = t;
-			S[Cache[i]++] = cur;
-		}
-	} // scope variables destroyed (some)
-	// second pass: scan and recurse on identical non-zero ranges
-	for (int i = 1; i < 16; ++i) {
-		char **NS = S+Bounds[i-1];
-		uint64_t len = Bounds[i] - Bounds[i-1];
-		if (len > 1) Cucasort(NS,len,d+1,maxD);
 	}
 }
 
@@ -1836,6 +1817,22 @@ inline uint32_t whereDiffMsk(char *A, char *B, uint32_t len) {
 	return len;
 }
 
+/* Prepares the reference database for dumping (or immediate use, a mode which is
+   no longer maintained). The steps to preparing the references for use include:
+   1. Parsing the references (see parse_tl_fasta*)
+   2. Converting them into numeric format for faster procesing and lookup
+   3. Shearing them into semi-overlapping shears (if much longer than queries)
+   4. Deduplicating the shears (or whole references, if not shorn)
+      - Involves a compression algorithm to determine shear boundaries for
+        better compression 
+      - This in turn requires some sorting algorithms specialized for DNA,
+        including a prefix-parallel sort that delegates to a radix quicksort.
+   5. Processing the shears into "clumps" of 16
+      - Involves clustering into similar clumps, or sorting by prefix
+   6. Creating fingerprints (small signature hashes for references, optional)
+      - Fingerprints are not the same as the accelerator ("ACX"). 
+   7. Storing clumps in vectorized format
+*/
 // curate is 0 (no dedupe), 1 (dedupe), 2 (make db so skip sse2 profiles)
 static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t maxLenQ, int curate) {
 	// variables for the db code
@@ -1957,7 +1954,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 					uint64_t len = Bcount[i+1]-Bcount[i];
 					char **section = Ptrs + Bcount[i];
 					Qs3w(section,len,NL,shear16p5);
-					//Cucasort(section, len, 5, shear16p5);
 				}
 				printf("[%u] Fourth pass: sort segments [%f]\n", 
 					pass, omp_get_wtime() - wtime);
@@ -2100,37 +2096,6 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 			Rd->RefStart = RefStart;
 			Rd->maxLenR = shear + ov;
 			
-			// reporting (DEBUG ONLY)
-			/*printf("DEBUG: reporting each reference [%u, total %llu] and the number of 'high bases' in it\n",origR,numLet);
-			uint64_t total_length_debug = 0, total_high_debug = 0, total_afterimage_debug = 0;
-			for (uint32_t i = 0; i < origR; ++i) {
-				uint32_t high = 0;
-				for (uint32_t j = 0; j < RefLen[i]; ++j) high += (uint8_t)origRefSeq[i][j] >= 16;
-				//printf("Reference %u [len %u]: %u high\n",i, RefLen[i],high);
-				for (uint32_t j = 0; j < RefLen[i]; ++j) if ((uint8_t)origRefSeq[i][j] >= 16) 
-					origRefSeq[i][j] = (uint8_t)origRefSeq[i][j] & 15;
-				total_high_debug += high;
-				high = 0;
-				for (uint32_t j = 0; j < RefLen[i]; ++j) high += (uint8_t)origRefSeq[i][j] >= 16;
-				//printf("-->Afterward: %u high\n",high);
-				total_afterimage_debug += high;
-				total_length_debug += RefLen[i];
-			}
-
-			printf("Total length = %llu, num high = %llu, afterimage = %llu\n",
-				total_length_debug,total_high_debug,total_afterimage_debug);
-			
-			total_high_debug = 0;
-			printf("\n\n\nDEBUG: reporting each sheared reference and the number of 'high bases' in them\n");
-			for (uint32_t i = 0; i < numRrebase; ++i) {
-				uint32_t high = 0;
-				for (uint32_t j = 0; j < newRefLen[i]; ++j) high += (uint8_t)newRefSeq[i][j] >= 16;
-				//printf("SHEARED Reference %u [len %u]: %u high\n",i, newRefLen[i],high);
-				total_high_debug += high;
-			}
-			printf("High afterward = %llu\n",total_high_debug);
-			*/
-			
 			#pragma omp parallel for
 			for (uint64_t i = 0; i < numLet; ++i) SeqDump[i] &= 15;
 
@@ -2269,6 +2234,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 	printf("There are %u references and hence %u clumps (+%u)\n",
 		Rd->totR, numRclumps, numRclumps*VECSZ < Rd->totR);
 	
+	// Fingerprints are an additional similarity screening mechanism for pre-guaging match quality
 	if (DO_FP) {
 		// The goal: Ensure each successive 16 (VECSZ) refs are reasonably similar to one another
 		PackaPrince Fp = create_fingerprints(Rd->RefSeq, Rd->totR, Rd->RefLen, Rd->RefIxSrt, 1 ,1);
@@ -2411,6 +2377,10 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		// naive greedy clusterer
 		{
 		double wtime = omp_get_wtime();
+
+		// A higher-quality alternative to the default clusterer. Instead of using
+		// multi-threading to speed up, it uses it to make multiple passes over the
+		// sequences at different offsets, and applies greedy clustering to each.
 		#ifdef CUBICLUST
 		// cubic zirconiu(m;^3)
 		uint32_t *T_Pack[THREADS], *T_Ppk[THREADS], 
@@ -2539,6 +2509,9 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		}
 		// end of greedy clusterer
 		
+		/* Here, whatever clusters were made above are further refined by using
+		   random permutations of cluster members between other clusters. It 
+		   settles into a global minimum distance. It is an EM-based approach. */
 		if (sig_thres) { // Cluster refinement loop
 			uint32_t *ClusFPs = malloc((tot16 >> 4)*sizeof(*ClusFPs));
 			#pragma omp parallel for
@@ -2633,6 +2606,9 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 		// New heirarchical clusterer: faster, more ram-friendly 
 		// ... removed 
 		
+		// Now we commit the clusters and their central fingerprints to their
+		// containers (fingerPrints go to "Prince" objects). One "combined" fingerprint
+		// exists for each cluster of 16 references. 
 		//#pragma omp sections
 		{
 			//#pragma omp section
@@ -2692,7 +2668,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 				Fp.initP = Fp.P = p;
 				Fp.Ptrs = NewPix;
 				if (Z) {
-					Prince t; // New: swap back error-free fingerprints; re-calc centroids
+					Prince t; // Swap back error-free fingerprints; re-calc centroids
 					for (uint32_t i = 0; i < totR; ++i) t = p[i], p[i] = p[Fp.Ptrs[i]], p[Fp.Ptrs[i]] = t;
 					for (uint32_t i = 0; i < totRC; ++i) {
 						Prince NC = p[i*VECSZ];
@@ -2765,6 +2741,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 	Rd->RefClump = RefClump;
 
 	//If in SSE2 mode, prepare profiles (TODO: move one profile generation per loop per thread)
+	// Note: SSE2 mode is no longer supported or maintained.
 	#ifndef __SSSE3__
 	if (curate < 2) create_sse2_profiles(Rd);
 	#endif
@@ -2777,6 +2754,7 @@ static inline void process_references(char *ref_FN, Reference_Data *Rd, uint32_t
 	if (REBASE) free(origRefLen), free(origRefSeq), free(origRefHead);
 }
 
+// Function to write the primary sequence database (edb file)
 static inline void dump_edb(FILE *output, Reference_Data *Rd) {
 	fputc(0, output); // will be padded later
 	uint64_t totRefHeadLen = 0; uint32_t shear = DB_QLEN / THRES;
@@ -2860,17 +2838,20 @@ static inline void dump_edb(FILE *output, Reference_Data *Rd) {
 	fwrite(&totRefHeadLen, sizeof(totRefHeadLen), 1, output);
 }
 
+// Function to read the primary sequence database (edb file)
 static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 	FILE *in = fopen(ref_FN, "rb"), *output = 0;
 	if (!in) {fputs("ERROR: cannot parse EDB",stderr); exit(1);}
-	uint8_t cb = fgetc(in), dbVer = cb & 0xF, doConv2_3 = 0, newVer = 0;
+	uint8_t cb = fgetc(in), dbVer = cb & 0xF, newVer = 0;
+	char *Raw = 0; uint64_t fsz = 0; // prepare *nix pagekick workaround
 	if (dbVer != EDX_VERSION && dbVer != EDB_VERSION) {
 		fprintf(stderr,"ERROR: invalid database version %u\n", dbVer);
 		exit(1);
 	}
-	else if (dbVer == EDB_VERSION) 
-		fprintf(stderr,"ERROR: Old DB version. Converting...\n"), 
-		doConv2_3 = 1;
+	else if (dbVer == EDB_VERSION) {
+		fprintf(stderr,"ERROR: Old DB version. Re-make with new version.\n");
+		exit(2);
+	}
 	REBASE = (uint8_t)(cb << 1) >> 7;
 	DO_FP = (uint8_t)(cb << 2) >> 7 && DO_FP;
 	if (!DO_FP) printf(" --> EDB: Fingerprints are DISABLED\n");
@@ -2883,12 +2864,12 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 	uint64_t totRefHeadLen = 0;
 	uint32_t totR = 0, origTotR = 0, numRclumps = 0, maxLenR = 0, shear = 0;
 	fread(&totRefHeadLen, sizeof(totRefHeadLen), 1, in);
-	if (dbVer > 1) fread(&shear, sizeof(shear), 1, in); // V2+
+	fread(&shear, sizeof(shear), 1, in); // V2+
 	fread(&totR, sizeof(totR), 1, in); 
 	fread(&origTotR, sizeof(origTotR), 1, in);
 	fread(&numRclumps, sizeof(numRclumps), 1, in);
 	fread(&maxLenR, sizeof(maxLenR), 1, in);
-
+	
 	char *RH_dump = malloc(totRefHeadLen), // *RH_orig = RH_dump,
 		**RefHead = malloc(origTotR * sizeof(*RefHead));
 	uint32_t *RefMap = 0, *RefStart = 0, *RefDedupIx = 0, 
@@ -2900,29 +2881,29 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 	fread(RH_dump, 1, totRefHeadLen, in);
 	*RefHead = RH_dump;
 	uint32_t numRefHeads = origTotR; 
-	if (dbVer == EDX_VERSION) fread(&numRefHeads,sizeof(numRefHeads),1,in);
+	fread(&numRefHeads,sizeof(numRefHeads),1,in);
 
 	for (uint32_t i = 1; i <numRefHeads; ++i) {
 		while (*RH_dump++);
 		RefHead[i] = RH_dump;
 	}
-	if (dbVer == EDX_VERSION) { // new unique header scheme
-		puts(" --> EDB: Parsing compressed headers");
-		RefMap = malloc(origTotR*sizeof(*RefMap));
-		if (!RefMap) {fputs("OOM:read_edb\n",stderr); exit(3);}
-		fread(RefMap, origTotR, sizeof(*RefMap), in);
-		char **NewRefHead = malloc(origTotR*sizeof(*NewRefHead)), *t;
-		for (uint32_t i = 0; i < origTotR; ++i) 
-			NewRefHead[i] = RefHead[RefMap[i]];
-		free(RefHead);
-		//Rd->DedupRefHead = RefHead;
-		Rd->RefMap = RefMap; // for de-duping alignments later
-		RefHead = NewRefHead;
-	}
+	
+	// New unique header scheme
+	puts(" --> EDB: Parsing compressed headers");
+	RefMap = malloc(origTotR*sizeof(*RefMap));
+	if (!RefMap) {fputs("OOM:read_edb\n",stderr); exit(3);}
+	fread(RefMap, origTotR, sizeof(*RefMap), in);
+	char **NewRefHead = malloc(origTotR*sizeof(*NewRefHead)), *t;
+	for (uint32_t i = 0; i < origTotR; ++i) 
+		NewRefHead[i] = RefHead[RefMap[i]];
+	free(RefHead);
+	//Rd->DedupRefHead = RefHead;
+	Rd->RefMap = RefMap; // for de-duping alignments later
+	RefHead = NewRefHead;
+	
 	if (REBASE) {
 		printf(" --> EDB: Sheared database ");
-		if (dbVer > 1) printf("(shear size = %u)\n",shear);
-		else printf("(WARNING: old DB with unknown shear size)\n");
+		printf("(shear size = %u)\n",shear);
 		RefStart = malloc(origTotR * sizeof(*RefStart));
 		if (!RefStart) {fputs("OOM:read_edb\n",stderr); exit(3);}
 		fread(RefStart, sizeof(*RefStart), origTotR, in);
@@ -2942,121 +2923,36 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 		if (ClumpLen[i] > maxLenR) maxLenR = ClumpLen[i];
 		totRPackLen += ClumpLen[i]/2u + (ClumpLen[i] & 1);
 	}
-	if (doConv2_3) {
-		int slen = strlen(ref_FN);
-		if (slen >= 4096) {puts("Filename error."); exit(1);}
-		char newName[4096] = {0};
-		strcpy(newName,ref_FN);
-		if (!strcmp(newName+slen-4,".edb")) newName[slen-1] = 'x';
-		else strcpy(newName+slen,".edx");
-		output = fopen(newName,"wb");
-		if (!output) {fprintf(stderr,"ERROR: Cannot write '%s'\n",newName); exit(1);}
-		fprintf(stderr," --> ConvEDB: Re-writing database as '%s'\n",newName);
-		newVer = 1 << 7 | REBASE << 6 | ((uint8_t)(cb << 2) >> 7) << 5 | Xalpha << 4 | EDX_VERSION;
-		fputc(newVer, output);
-		totRefHeadLen = 0;
-		fwrite(&totRefHeadLen, sizeof(totRefHeadLen), 1, output);
-		fwrite(&shear, sizeof(shear), 1, output);
-		fwrite(&totR, sizeof(totR), 1, output);
-		fwrite(&origTotR, sizeof(origTotR), 1, output);
-		fwrite(&numRclumps, sizeof(numRclumps), 1, output);
-		fwrite(&maxLenR, sizeof(maxLenR), 1, output);
-		//fwrite(*RefHead, 1, totRefHeadLen, output);
-		// Sort and dedupe.
-		StrIxPair *Str_Ix = malloc(origTotR*sizeof(*Str_Ix));
-		for (uint32_t i = 0; i < origTotR; ++i) 
-			Str_Ix[i] = (StrIxPair){RefHead[i],i};
-		qsort(Str_Ix,origTotR,sizeof(*Str_Ix),cmpStrIx);
-		uint32_t *RefMap = malloc(origTotR*sizeof(*RefMap));
-		uint32_t nix = 0;
-		char *cur = Str_Ix[nix].s;
-		totRefHeadLen += 1 + fprintf(output, "%s", cur), fputc(0,output);
-		for (uint32_t i = 0; i < origTotR; ++i) {
-			if (strcmp(cur,Str_Ix[i].s)) {
-				cur = Str_Ix[i].s;
-				totRefHeadLen += 1 + fprintf(output, "%s", cur), fputc(0,output);
-				++nix;
-			}
-			RefMap[Str_Ix[i].ix] = nix;	
-		}
-		nix++;
-		fwrite(&nix, sizeof(nix), 1, output); // read in as numRefHeads
-		fwrite(RefMap, sizeof(*RefMap),origTotR, output);
-
-		if (REBASE) fwrite(RefStart, sizeof(*RefStart), origTotR, output);
-		if (totR != origTotR) fwrite(RefDedupIx, sizeof(*RefDedupIx), totR + 1, output);
-		fwrite(TmpRIX, sizeof(*TmpRIX), origTotR, output);
-		fwrite(ClumpLen, sizeof(*ClumpLen), numRclumps, output);
-
-		uint64_t oldTotRPackLen = 0;
-		#pragma omp simd reduction(+:oldTotRPackLen)
-		for (uint32_t i = 0; i < numRclumps; ++i) 
-			oldTotRPackLen += ClumpLen[i];
-		printf(" --> ConvEDB: Original pack table: %llu [now %llu]\n",
-			oldTotRPackLen, totRPackLen);
-		DualCoil *DC_Dump = malloc((oldTotRPackLen+1)*sizeof(*DC_Dump));
-		if (!DC_Dump) {fputs("OOM:read_edb\n",stderr); exit(3);}
-		fread(DC_Dump, sizeof(*DC_Dump), oldTotRPackLen, in);
-		uint64_t pix = 0, totWritten = 0;
-		for (uint32_t i = 0; i < numRclumps; ++i) {
-			for (uint32_t j = 0; j < ClumpLen[i]; j+=2) {
-				__m128i i1 = _mm_load_si128((void*)(DC_Dump + pix++));
-				__m128i i2 = _mm_setzero_si128();
-				if (j + 1 < ClumpLen[i]) i2 = _mm_load_si128((void*)(DC_Dump + pix++));
-				i2 = _mm_and_si128(_mm_slli_epi16(i2,4),_mm_set1_epi8(0xF0));
-				DualCoil x;
-				_mm_store_si128((void*)&x, _mm_or_si128(i1, i2));
-				fwrite(&x, sizeof(x), 1, output);
-				++totWritten;
-			}
-		}
-		printf(" --> ConvEDB: Number read: %llu, written: %llu\n", pix, totWritten);
-	}
-	else { // read new format edb (TODO FIX)
-		DualCoil *DC_Dump = malloc((totRPackLen+1)*sizeof(*DC_Dump));
-		if (!DC_Dump) {fputs("OOM:read_edb\n",stderr); exit(3);}
-		fread(DC_Dump, sizeof(*DC_Dump), totRPackLen, in);
-		size_t accum = 0;
-		//#pragma omp simd reduction(+:accum)
-		*RefClump = DC_Dump;
-		for (uint32_t i = 1; i < numRclumps; ++i) 
-			RefClump[i] = RefClump[i-1] + ClumpLen[i-1]/2u + (ClumpLen[i-1] & 1);
-	}
+	
+	DualCoil *DC_Dump = malloc((totRPackLen+1)*sizeof(*DC_Dump));
+	if (!DC_Dump) {fputs("OOM:read_edb\n",stderr); exit(3);}
+	fread(DC_Dump, sizeof(*DC_Dump), totRPackLen, in);
+	size_t accum = 0;
+	//#pragma omp simd reduction(+:accum)
+	*RefClump = DC_Dump;
+	for (uint32_t i = 1; i < numRclumps; ++i) 
+		RefClump[i] = RefClump[i-1] + ClumpLen[i-1]/2u + (ClumpLen[i-1] & 1);
+	
 	Prince *Centroids = 0; 
 	void *init_FP = 0; Prince *FullPrince = 0;
 	uint32_t R=0, numFPs=0, unAmbig = 0, *FP_ptrs = 0;
-	if (DO_FP || (doConv2_3 && (uint8_t)(cb << 2) >> 7)) {
-		printf(" --> %sEDB: Fingerprinting is enabled ", doConv2_3 ? "Conv" : "");
+	if (DO_FP) {
+		printf(" --> EDB: Fingerprinting is enabled ");
 		Centroids = malloc(numRclumps*sizeof(*Centroids));
 		if (!Centroids) {fputs("OOM:read_edb\n",stderr); exit(3);}
 		fread(Centroids, sizeof(*Centroids), numRclumps, in);
-		if (dbVer) { // DB version > 0 [check individual bit?]
-			fread(&numFPs, sizeof(numFPs), 1, in);
-			if (!numFPs) numFPs = totR, R = 1, printf("[RESTRICTED DB] ");
-			else {
-				FP_ptrs = malloc(totR*sizeof(*FP_ptrs));
-				if (!FP_ptrs) {fputs("OOM:read_edb\n",stderr); exit(3);}
-				fread(FP_ptrs, sizeof(*FP_ptrs), totR, in);
-			}
-			FullPrince = calloc_a(64,(numFPs+VECSZ-1)*sizeof(*FullPrince),&init_FP);
-			if (!init_FP) {fputs("OOM:read_edb\n",stderr); exit(3);}
-			printf("(%u FPs)\n",numFPs);
-			fread(FullPrince, sizeof(*FullPrince), numFPs, in);
+		fread(&numFPs, sizeof(numFPs), 1, in);
+		if (!numFPs) numFPs = totR, R = 1, printf("[RESTRICTED DB] ");
+		else {
+			FP_ptrs = malloc(totR*sizeof(*FP_ptrs));
+			if (!FP_ptrs) {fputs("OOM:read_edb\n",stderr); exit(3);}
+			fread(FP_ptrs, sizeof(*FP_ptrs), totR, in);
 		}
-		else printf("(WARNING: old DB without individual FPs)\n");
-		if (doConv2_3) {
-			fwrite(Centroids, sizeof(*Centroids), numRclumps, output);
-			fwrite(&numFPs, sizeof(numFPs), 1, output);
-			if (numFPs) fwrite(FP_ptrs, sizeof(*FP_ptrs), totR, output);
-			fwrite(FullPrince, sizeof(*FullPrince), numFPs, output);
-			fprintf(stderr," --> ConvEDB: complete. Re-run with the new .edx\n");
-		}
-	}
-	if (doConv2_3) {
-		rewind(output);
-		fputc(newVer,output);
-		fwrite(&totRefHeadLen, sizeof(totRefHeadLen), 1, output);
-		exit(0);
+		FullPrince = calloc_a(64,(numFPs+VECSZ-1)*sizeof(*FullPrince),&init_FP);
+		if (!init_FP) {fputs("OOM:read_edb\n",stderr); exit(3);}
+		printf("(%u FPs)\n",numFPs);
+		fread(FullPrince, sizeof(*FullPrince), numFPs, in);
+		
 	}
 	fclose(in);
 
@@ -3072,21 +2968,25 @@ static inline uint32_t read_edb(char *ref_FN, Reference_Data *Rd) {
 	Rd->FingerprintsR.Ptrs = FP_ptrs;
 	Rd->FingerprintsR.nf = R ? 0 : numFPs; 
 	Rd->FingerprintsR.initP = init_FP;
+	Rd->RawEDB = Raw; Rd->RawEDB_sz = fsz; 
 	printf(" --> EDB: %u refs [%u orig], %u clumps, %u maxR\n",
 		totR, origTotR, numRclumps, maxLenR);
 	return shear;
 }
 
+// Function to sort queries, determine error tolerance profiles, set up
+// data structures. It reverse complements, deduplicates, and precomputes
+// prefix lengths between successive queries ("divergences").
 static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	char **QHead, **QSeq; //size_t
-	uint32_t *QLen, *Divergence;
-	uint32_t totQ, maxLenQ = 0, minLenQ = UINT32_MAX;
+	uint32_t *QLen, *Divergence, maxLenQ = 0, minLenQ = UINT32_MAX;
+	uint64_t totQ;
 	double wt = omp_get_wtime();
 	totQ = parse_tl_faster(query_FN, &QHead, &QSeq, &QLen);
 	if (!totQ) {fputs("ERROR: No queries found.",stderr); exit(1);}
 	if (!Qd->incl_whitespace) {
 		#pragma omp parallel for
-		for (uint32_t i = 0; i < totQ; ++i) {
+		for (uint64_t i = 0; i < totQ; ++i) {
 			char *q = QHead[i];
 			while (*q && *q != ' ' && *q != '\t') ++q; *q = 0;
 		}
@@ -3094,7 +2994,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	printf("Parsed %u queries (%f). Calculating minMax... \n",totQ,omp_get_wtime()-wt);
 	wt = omp_get_wtime();
 	#pragma omp parallel for reduction(max:maxLenQ) reduction(min:minLenQ)
-	for (uint32_t i=0; i < totQ; ++i) {
+	for (uint64_t i=0; i < totQ; ++i) {
 		if (QLen[i] > maxLenQ) maxLenQ = QLen[i];
 		if (QLen[i] < minLenQ) minLenQ = QLen[i]; 
 	}
@@ -3106,7 +3006,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 		printf("Converting queries... ");
 		wt = omp_get_wtime();
 		#pragma omp parallel for
-		for (uint32_t i = 0; i < totQ; ++i) translate16aln(QSeq[i],QLen[i]);
+		for (uint64_t i = 0; i < totQ; ++i) translate16aln(QSeq[i],QLen[i]);
 		printf("Converted (%f)\n", omp_get_wtime()-wt);
 	}
 	printf("Copying queries... ");
@@ -3114,7 +3014,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	StrIxPair *Query_Ix = malloc(totQ * sizeof(*Query_Ix));
 	if (!Query_Ix) {fputs("OOM:Query_Ix\n",stderr); exit(3);}
 	#pragma omp parallel for
-	for (uint32_t i = 0; i < totQ; ++i) Query_Ix[i]=(StrIxPair){QSeq[i],i};
+	for (uint64_t i = 0; i < totQ; ++i) Query_Ix[i]=(StrIxPair){QSeq[i],i};
 	printf("Copied (%f)\n",omp_get_wtime() - wt);
 	printf("Sorting queries... ");
 	wt = omp_get_wtime();
@@ -3123,10 +3023,10 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 
 	printf("Copying indices... ");
 	wt = omp_get_wtime();
-	uint32_t *NewIX = malloc(totQ*sizeof(*NewIX));
+	uint64_t *NewIX = malloc(totQ*sizeof(*NewIX));
 	if (!NewIX) {fputs("OOM:NewIX\n",stderr); exit(3);}
 	#pragma omp parallel for 
-	for (uint32_t i = 0; i < totQ; ++i) NewIX[i] = Query_Ix[i].ix;
+	for (uint64_t i = 0; i < totQ; ++i) NewIX[i] = Query_Ix[i].ix;
 	free(Query_Ix), Query_Ix = 0;
 	printf("Copied (%f)\n",omp_get_wtime() - wt);
 
@@ -3136,26 +3036,26 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	uint8_t *IsUniq = calloc(totQ,1);
 	if (!IsUniq) {fputs("OOM:IsUniq\n",stderr); exit(3);}
 	IsUniq[0] = 1;
-	uint32_t numUniqQ = 1, numUniqQ_rc = 0;
+	uint64_t numUniqQ = 1, numUniqQ_rc = 0;
 	#pragma omp parallel for reduction(+:numUniqQ)
-	for (uint32_t i = 1; i < totQ; ++i) 
+	for (uint64_t i = 1; i < totQ; ++i) 
 		if (strcmp(QSeq[NewIX[i-1]],QSeq[NewIX[i]]))
 			IsUniq[i] = 1, ++numUniqQ;
 	printf("Done (%f). Number unique: %u\n",omp_get_wtime() - wt, numUniqQ);
 
 	printf("Collecting unique sequences... ");
 	wt = omp_get_wtime();
-	uint32_t *Offset = malloc((numUniqQ+1)*sizeof(*Offset));
+	uint64_t *Offset = malloc((numUniqQ+1)*sizeof(*Offset));
 	if (!Offset) {fputs("OOM:Offset\n",stderr); exit(3);}
-	uint32_t uix = 0;
-	for (uint32_t i = 0; i < totQ; ++i) 
+	uint64_t uix = 0;
+	for (uint64_t i = 0; i < totQ; ++i) 
 		if (IsUniq[i]) Offset[uix++] = i;
 	Offset[numUniqQ] = totQ;
 
 	char **SrtQHead = malloc(totQ*sizeof(*SrtQHead));
 	if (!SrtQHead) {fputs("OOM:SrtQHead\n",stderr); exit(3);}
 	#pragma omp parallel for
-	for (uint32_t i = 0; i < totQ; ++i) 
+	for (uint64_t i = 0; i < totQ; ++i) 
 		SrtQHead[i] = QHead[NewIX[i]];
 	free(QHead); QHead = SrtQHead;
 	printf("Done (%f)\n",omp_get_wtime() - wt);
@@ -3169,8 +3069,8 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	float reqID = 1/THRES - 1;
 	uint64_t uniqTotLen = 0; uint32_t maxED = 0;
 	#pragma omp parallel for reduction(+:uniqTotLen) reduction(max:maxED)
-	for (uint32_t i = 0; i < numUniqQ; ++i) {
-		uint32_t rix = Offset[i];
+	for (uint64_t i = 0; i < numUniqQ; ++i) {
+		uint64_t rix = Offset[i];
 		uint32_t len = QLen[NewIX[rix]], ed = reqID * len;
 		ShrBins[i].len = len;
 		ShrBins[i].ed = MIN(254,ed);
@@ -3185,15 +3085,16 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	
 	char *RCDump = 0;
 	if (Qd->rc && !DO_PREPASS) {
-		if (numUniqQ >= UINT32_MAX/2) {fprintf(stderr,"ERROR: too many queries for RC\n"); exit(1);}
+		if (numUniqQ >= UINT32_MAX/2) {fprintf(stderr,"Note: Experimental hi-query RC\n"); }
 		printf("Processing reverse complements... ");
 		wt = omp_get_wtime();
 		RCDump = malloc(uniqTotLen + numUniqQ + 1);
 		if (!RCDump) {fputs("OOM:RCDump\n",stderr); exit(3);}
 		char *ptr = RCDump;
 		#pragma omp parallel for
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
-			uint32_t len = ShrBins[i].len, nix = numUniqQ + i;
+		for (uint64_t i = 0; i < numUniqQ; ++i) {
+			uint32_t len = ShrBins[i].len;
+			uint64_t nix = numUniqQ + i;
 			char *rcs, *org = UniBins[i].Seq;
 			#pragma omp atomic capture
 			{rcs = ptr; ptr += len + 1;}
@@ -3207,12 +3108,12 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 		printf("Processed (%f) [offset %llu / %llu]\n",omp_get_wtime() - wt,ptr-RCDump,uniqTotLen+numUniqQ);
 	}
 
-	uint32_t *QBins = calloc(5,sizeof(*QBins));
-	uint32_t  nq_clear, nq_ambig, nq_bad;
+	uint64_t *QBins = calloc(5,sizeof(*QBins));
+	uint64_t  nq_clear, nq_ambig, nq_bad;
 	if (!DO_PREPASS && DO_ACCEL) {
 		printf("Determining query ambiguity... ");
 		wt = omp_get_wtime();
-		uint32_t newUniqQ = numUniqQ_rc;
+		uint64_t newUniqQ = numUniqQ_rc;
 		// re-sort queries: ambig (0), unambig (1), bad (2) [tooManyErrors = 3?]
 		uint8_t *QStat = malloc((1+newUniqQ)*sizeof(*QStat));
 		//Umap = malloc(newUniqQ*sizeof(*Umap));
@@ -3220,7 +3121,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 		memset(QStat,1,newUniqQ*sizeof(*QStat));
 		QStat[newUniqQ] = 0; // endcap JIC
 		#pragma omp parallel for
-		for (uint32_t i = 0; i < newUniqQ; ++i) {
+		for (uint64_t i = 0; i < newUniqQ; ++i) {
 			//uint32_t ai = i >= numUniqQ ? RCMap[i-numUniqQ] : i;
 			UniBin Ub = UniBins[i]; ShrBin Sb = ShrBins[Ub.six];
 
@@ -3242,22 +3143,20 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 		printf("Creating bins... ");
 		wt = omp_get_wtime();
 		{
-			uint32_t *P = QBins + 1;
+			uint64_t *P = QBins + 1;
 			#pragma omp parallel for
-			for (uint32_t i = 0; i < newUniqQ; ++i) 
+			for (uint64_t i = 0; i < newUniqQ; ++i) 
 				#pragma omp atomic update
 				++P[QStat[i]];
 			nq_ambig = P[0], nq_clear = P[1], nq_bad = P[2];
 			--P;
 			for (uint32_t i = 1; i < 5; ++i) P[i] += P[i-1];
 			
-			uint32_t QIX[4] = {0}; // = {P[1], P[2], P[3], P[4], P[4]};
+			uint64_t QIX[4] = {0}; // = {P[1], P[2], P[3], P[4], P[4]};
 			for (uint32_t i = 0; i < 3; ++i) QIX[i] = P[i+1]; 
 			QIX[3] = -1; // the last [faux] bin is never incrementable!
-			//printf("%u -> %u -> %u -> %u\n",P[0],P[1],P[2],P[3]);
-			//printf("QIX: %u -> %u -> %u -> %u\n",QIX[0],QIX[1],QIX[2],QIX[3]);
 			uint8_t cur_bin = 0; //uint64_t totScan = 0;
-			for (uint32_t i = 0; i < newUniqQ; ++i) {
+			for (uint64_t i = 0; i < newUniqQ; ++i) {
 				UniBin tb; uint8_t ts;
 				//printf("[%u]: %u",i,QStat[i]);
 				while (i >= QIX[cur_bin]) i = P[++cur_bin]; //, printf("->%u(b%u)",i,cur_bin); 
@@ -3267,32 +3166,11 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 					UniBins[i] = UniBins[P[ts]], UniBins[P[ts]] = tb;
 					QStat[i] = QStat[P[ts]], QStat[P[ts]] = ts;
 					++P[ts]; // remote increment
-					//++totScan;
 				}
 				++P[cur_bin];
-				//++totScan;
-				//printf("\n");
 			}
-			// DEBUG: double-check that we are indeed in ascending order (at least in the QStat bins)
-			//#pragma omp parallel for
-			//for (uint32_t i = 1; i < newUniqQ; ++i) 
-			//	if (QStat[i] < QStat[i-1]) {puts("ERROR IN QSTAT"); exit(10);}
 			free(QStat);
-			//printf("Tot: %llu, P[0,1,2,3] = %u,%u,%u,%u\n",totScan, P[0],P[1],P[2],P[3]);
-			
 		}
-		/* Split *Ix_Code = malloc(newUniqQ*sizeof(*Ix_Code));
-		for (uint32_t i = 0; i < newUniqQ; ++i) Ix_Code[i] = (Split){QStat[i],i};
-		int SpltCmp(const void *a, const void *b) {
-			Split *A = (Split *)a, *B = (Split *)b;
-			return A->i < B->i ? -1 : B->i < A->i;
-		}
-		qsort(Ix_Code, newUniqQ, sizeof(*Ix_Code), SpltCmp);
-		UniBin *NUniBins = malloc(newUniqQ*sizeof(*NUniBins));
-		for (uint32_t i = 0; i < newUniqQ; ++i) NUniBins[i] = UniBins[Ix_Code[i].i];
-		free(UniBins); free(Ix_Code);
-		UniBins = NUniBins; */
-		//++QBins; // TEST ONLY
 		
 		printf("Created (%f); Unambig: %u, ambig: %u, super-ambig: %u [%u,%u,%u]\n",omp_get_wtime() - wt,
 			nq_clear, nq_ambig, nq_bad, QBins[0], QBins[1], QBins[2]);
@@ -3314,7 +3192,7 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	if (THRES <= 0.75f) cacheSz /= 2;  // limit thrashing
 	cacheSz = MIN(maxLenQ+2, cacheSz); // limit space
 	#pragma omp parallel for reduction(+:tot_div) reduction(max:maxDiv)
-	for (uint32_t i = 1; i < numUniqQ_rc; ++i) {
+	for (uint64_t i = 1; i < numUniqQ_rc; ++i) {
 		uint32_t div = 1;
 		char *prv = UniBins[i-1].Seq, *cur = UniBins[i].Seq;
 		while (*prv && *prv++ == *cur++) ++div;
@@ -3344,113 +3222,13 @@ static inline void process_queries(char *query_FN, Query_Data *Qd) {
 	//exit(1);
 }
 
-//#define SCOUR_NB 3
-//uint32_t getAmbigScour(char *S, uint32_t w, uint8_t ix) {
-static void setAmbigScour20(uint16_t *Hash, Split *Refs, uint32_t *nref, uint32_t mmatch,
- void **Forest, char *S, uint32_t qdim, uint32_t t, uint8_t ix, uint32_t *Cache, uint32_t *cix) {
-	if (ix == SCOUR_N) {
-		for (void *PXp = Forest[t]; PXp < Forest[t+1]; PXp+=5) {
-			uint64_t PX = *(uint64_t *)PXp;
-			uint32_t px1 = PX & 0xFFFFF, px2 = (PX >> 20) & 0xFFFFF;
-			if (!Hash[px1]) Cache[(*cix)++] = px1;
-			if (Hash[px1] == mmatch) {
-				Hash[px1] = qdim + mmatch + 1;
-				Refs[(*nref)++].v = px1;
-			} 
-			else if (Hash[px1] < UINT16_MAX) ++Hash[px1];
-			if (PXp + 3 >= Forest[t+1]) break;
-			if (!Hash[px2]) Cache[(*cix)++] = px2;
-			if (Hash[px2] == mmatch) {
-				Hash[px2] = qdim + mmatch + 1;
-				Refs[(*nref)++].v = px2;
-			} 
-			else if (Hash[px2] < UINT16_MAX) ++Hash[px2];
-		}
-	}
-	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
-		setAmbigScour20(Hash, Refs, nref, mmatch, Forest, S, qdim,
-			t << 2 | AMBIGS[S[ix]][i], ix + 1, Cache, cix);
-}
-
-static void setAmbigScour24(uint16_t *Hash, Split *Refs, uint32_t *nref, uint32_t mmatch,
- void **Forest, char *S, uint32_t qdim, uint32_t w, uint8_t ix, uint32_t *Cache, uint32_t *cix) {
-	if (ix == SCOUR_N) {
-		for (void *PXp = Forest[w]; PXp < Forest[w+1]; PXp+=3) {
-			uint32_t PX = *(uint32_t *)PXp & 0xFFFFFF;
-			if (!Hash[PX]) Cache[(*cix)++] = PX;
-			if (Hash[PX] == mmatch) 
-				Hash[PX] = qdim + mmatch,
-				Refs[(*nref)++].v = PX;
-			else if (Hash[PX] < UINT16_MAX) ++Hash[PX];
-		}
-	}
-	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
-		setAmbigScour24(Hash, Refs, nref, mmatch, Forest, S, qdim,
-			w << 2 | AMBIGS[S[ix]][i], ix + 1, Cache, cix);
-}
-
-static void setUnambigScour20(uint16_t *Hash, Split *Refs, uint32_t *nref, uint32_t mmatch,
- void **Forest, char *s, uint32_t qdim, uint32_t len, uint32_t *Cache, uint32_t *cix) {
-  	uint32_t w = 0; // cache k-indices
-	for (uint32_t k = 0; k + 1 < SCOUR_N; ++k)
-		w <<= 2, w |= s[k]-1;
-	for (uint32_t k = SCOUR_N-1; k < len; ++k) {
-		w <<= 2, w |= s[k]-1;
-		uint32_t t = (w << SCOUR_R) >> SCOUR_R;
-		for (void *PXp = Forest[t]; PXp < Forest[t+1]; PXp+=5) {
-			uint64_t PX = *(uint64_t *)PXp;// & 0xFFFFFF;
-			uint32_t px1 = PX & 0xFFFFF, px2 = (PX >> 20) & 0xFFFFF;
-			if (!Hash[px1]) Cache[(*cix)++] = px1;
-			if (Hash[px1] == mmatch) {
-				Hash[px1] = qdim + mmatch + 1;
-				Refs[(*nref)++].v = px1;
-			} 
-			else if (Hash[px1] < UINT16_MAX) ++Hash[px1];
-			if (PXp + 3 >= Forest[t+1]) break;
-			if (!Hash[px2]) Cache[(*cix)++] = px2;
-			if (Hash[px2] == mmatch) {
-				Hash[px2] = qdim + mmatch + 1;
-				Refs[(*nref)++].v = px2;
-			} 
-			else if (Hash[px2] < UINT16_MAX) ++Hash[px2];
-		}
-	}
-}
-static void setUnambigScour24(uint16_t *Hash, Split *Refs, uint32_t *nref, uint32_t mmatch,
- void **Forest, char *s, uint32_t qdim, uint32_t len, uint32_t *Cache, uint32_t *cix) {
-	  uint32_t w = 0; // cache k-indices
-	for (uint32_t k = 0; k + 1 < SCOUR_N; ++k)
-		w <<= 2, w |= s[k]-1;
-	for (uint32_t k = SCOUR_N-1; k < len; ++k) {
-		w <<= 2, w |= s[k]-1;
-		uint32_t t = (w << SCOUR_R) >> SCOUR_R;
-		for (void *PXp = Forest[t]; PXp < Forest[t+1]; PXp+=3) {
-			uint32_t PX = *(uint32_t *)PXp & 0xFFFFFF;
-			if (!Hash[PX]) Cache[(*cix)++] = PX;
-			if (Hash[PX] == mmatch) {
-				Hash[PX] = qdim + mmatch + 1;
-				Refs[(*nref)++].v = PX;
-			} 
-			else if (Hash[PX] < UINT16_MAX) ++Hash[PX];
-		}
-	}
-}
-static void (*setAmbigScour)(uint16_t *, Split *, uint32_t *, uint32_t, void **, 
-	char *, uint32_t, uint32_t, uint8_t, uint32_t *, uint32_t *) = setAmbigScour20;
-static void (*setUnambigScour)(uint16_t *, Split *, uint32_t *, uint32_t,
-	void **, char *, uint32_t, uint32_t, uint32_t *, uint32_t *) = setUnambigScour20;
-
-static inline void storeUnambigWords(Split *Word_Ix, char *s, uint32_t len, uint32_t *wix, uint32_t j) {
-	uint32_t w = *s - 1;
-	for (uint32_t k = 1; k + 1 < SCOUR_N; ++k)
-		w <<= 2, w |= s[k]-1;
-	for (uint32_t k = SCOUR_N-1; k < len; ++k) {
-		w <<= 2, w |= s[k]-1;
-		uint32_t t = (w << SCOUR_R) >> SCOUR_R;
-		Word_Ix[(*wix)++] = (Split){t,j};
-	}
-}
-
+/* These functions are used to populate the accelerator (ACX) data structure, 
+    the purpose of which is described below in make_accelerator. There are 
+    two accelerator formats, one that can index into 1 million "clumps" (which are
+    16-packs of sheared reference sequences), called "SMALL" format, and another 
+    that can index up to 16 million such clumps. Depending on the size, the 
+    logic of the function changes to accomodate these non-integer-width lookups.
+*/
 static void storeAmbigWords(Split *Word_Ix, char *S, uint32_t *wix, uint32_t j, uint32_t w, uint32_t ix) {
 	if (ix == SCOUR_N) Word_Ix[(*wix)++] = (Split){w, j};
 	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
@@ -3506,15 +3284,6 @@ static void postScour20(uint16_t *Hash, void **Forest, Split *Word_Ix,
 static void (*postScour)(uint16_t *, void **, Split *,
  uint32_t , uint32_t *, uint32_t *) = postScour20;
 	
-void addAmbigScour(Accelerant *F, uint32_t r, char *S, uint32_t w, uint8_t ix) {
-	if (ix == SCOUR_N) {
-		if (F[w].len == F[w].cap) // check on success of realloc here?
-			F[w].Refs = realloc(F[w].Refs,(F[w].cap+=(F[w].cap>>3)+1)*sizeof(*F[w].Refs));
-		if (!F[w].len || F[w].Refs[F[w].len-1] != r) F[w].Refs[F[w].len++] = r;
-	}
-	else for (int8_t i = 0; AMBIGS[S[ix]][i] != UINT8_MAX; ++i) 
-		addAmbigScour(F, r, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
-}
 void countAmbigScour(uint8_t *C, uint32_t *W, uint32_t *I, char *S, uint32_t w, uint8_t ix) {
 	if (ix == SCOUR_N) { if (!(C[w >> 3] & (1 << (w & 7)))) 
 		W[(*I)++] = w, C[w >> 3] |= (1 << (w & 7)); }
@@ -3522,6 +3291,16 @@ void countAmbigScour(uint8_t *C, uint32_t *W, uint32_t *I, char *S, uint32_t w, 
 		countAmbigScour(C, W, I, S, w << 2 | AMBIGS[S[ix]][i], ix + 1);
 }
 
+/* Create "accelerator" (ACX) supplementary database file. This optional file 
+    can accelerate alignments by pre-filtering eligible references via short k-
+    mer/hash lookups. For burst12, these lookups are length 12 (15 for burst15).
+
+    Because this structure must account for ambiguous bases in the references,
+    there is some additional logic to add in all unambiguous variants of each
+    k-mer. During alignment, the query is also decomposed into k-mers and 
+    lookups occur over the length of the query (and all ambiguous variants) occurs
+    against the reference k-mer database (and all its ambiguous variants too).
+*/
 void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	FILE *out = fopen(xcel_FN,"wb");
 	if (!out) {fprintf(stderr, "Cannot write accelerator '%s'\n",xcel_FN); exit(1);}
@@ -3727,15 +3506,9 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		fwrite(&F[i].len, sizeof(F[i].len), 1, out);
 	
 
-	//for (uint32_t i = 0; i < num_k; ++i) 
-	//	fwrite(F[i].Refs, sizeof(*F[i].Refs), F[i].len, out);
-	//uint64_t count = 0;
 	if (totRC > 16777214) {fputs("ERROR: acc error M16\n",stderr); exit(101);}
 	else if (totRC > 1048574) {
 		fputs(" --> [Re-Accel] Writing LARGE format acx...\n", stderr);
-		//for (size_t i = 0; i < totalWords; ++i) // replace these "totalwords" things with the commented construct above
-		//	fwrite(WordDump + i*sizeof(uint32_t), 3, 1, out);
-		//count = totalWords;
 		for (uint32_t i = 0; i < num_k; ++i)
 			for (uint32_t k = 0; k < F[i].len; ++k)
 				fwrite(&F[i].Refs[k],3,1,out);
@@ -3758,10 +3531,10 @@ void make_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	printf("Wrote accelerator (%f).\n",omp_get_wtime()-wtime);
 }
 
+// Read in the "ACX" hash file described above. 
 void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	FILE *in = fopen(xcel_FN,"rb");
 	if (!in) {fprintf(stderr, "Cannot read accelerator '%s'\n",xcel_FN); exit(1);}
-	
 	uint8_t cb = fgetc(in), 
 		dbVer = (uint8_t)(cb << 4) >> 4,
 		didZ = (uint8_t)(cb << 1) >> 7; 
@@ -3769,14 +3542,13 @@ void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
 		fprintf(stderr,"ERROR: Accelerator built without '-y'; can't use '-y'\n");
 		exit(1);
 	}
-	int slen = 0;
 	if (cb < 128 || (dbVer != ACC_VERSION && dbVer != ACC_VERSION_BIG)) {
 		fprintf(stderr,"ERROR: invalid accelerator [%u:%u]\n", cb, dbVer);
 		if (cb >= 128 && dbVer == SCOUR_N) 
-			puts("Old accelerator version detected. Converting to .acx..."),
-			slen = strlen(xcel_FN);
+			puts("Old accelerator version detected! Please re-make it.");
 		else exit(1);
 	}
+	char *Raw = 0; uint64_t fsz = 0; // for re-mapping fix later on 'Nix
 	uint32_t szBL, hashSz = 1 << (2*SCOUR_N), *BadList = 0, 
 		*Lens = malloc(hashSz*sizeof(*Lens)); 
 	fread(&szBL,sizeof(szBL),1,in);
@@ -3784,7 +3556,6 @@ void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	if (!BadList || !Lens) {fputs("OOM:BadList_rd\n",stderr); exit(3);}
 	printf(" --> [Accel] Accelerator found. Parsing...\n");
 	fread(Lens, sizeof(*Lens), hashSz, in);
-	uint32_t chunk = slen ? sizeof(uint32_t)*8 : 20;
 	size_t sumBytes = 0, sumWords = 0;
 	for (uint32_t i = 0; i < hashSz; ++i) sumWords += Lens[i];
 	if (dbVer == ACC_VERSION) for (uint32_t i = 0; i < hashSz; ++i) 
@@ -3798,88 +3569,79 @@ void read_accelerator(Reference_Data *Rd, char *xcel_FN) {
 	fread(WordDump,1,sumBytes,in);
 	printf(" --> [Accel] Reading %u ambiguous entries\n",szBL);
 	fread(BadList,sizeof(*BadList),szBL,in);
-
+	
 	// pointer mapping
 	void **Forest = malloc((1+hashSz)*sizeof(*Forest));
 	if (!Forest) {fputs("OOM:Forest_rd\n",stderr); exit(3);}
 	*Forest = WordDump;
-	
-	if (slen) { // convert acc to new acx format
-		for (uint32_t i = 1; i <= hashSz; ++i)
-			Forest[i] = Forest[i-1] + Lens[i-1] * sizeof(uint32_t);
-
-		if (slen >= 4096) {puts("Filename error."); exit(1);}
-		char newName[4096] = {0};
-		strcpy(newName,xcel_FN);
-		if (!strcmp(newName+slen-4,".acc")) newName[slen-1] = 'x';
-		else strcpy(newName+slen,".acx");
-		uint64_t max = 0;
-		for (uint32_t x = 0; x < hashSz; ++x) if (Lens[x] > max) max = Lens[x];
-		printf("Maximum length record in this database is %llu\n",max);
-		max = 0; uint32_t *WD32 = WordDump; 
-		for (uint64_t x = 0; x < sumWords; ++x) 
-			if (max < WD32[x]) max = WD32[x];
-		printf("Maximum pivot: %llu\n",max);
-		
-
-		FILE *out = fopen(newName,"wb");
-		if (!out) {fprintf(stderr,"ERROR: Cannot write '%s'\n",newName); exit(1);}
-		uint8_t vers = (1 << 7) | (didZ << 6) | (max > 1048574 ? ACC_VERSION_BIG : ACC_VERSION);
-		fwrite(&vers,sizeof(vers),1,out);
-		fwrite(&szBL, sizeof(szBL), 1, out);
-		fwrite(Lens, sizeof(*Lens), hashSz, out);
-
-		uint64_t count = 0;
-		if (max > 16777214) {fputs("ERROR: acc error 101\n",stderr); exit(101);}
-		else if (max > 1048574) {
-			fputs(" --> [Re-Accel] Writing LARGE format acx...\n", stderr);
-			for (size_t i = 0; i < sumWords; ++i)
-				fwrite(WordDump + i*sizeof(uint32_t), 3, 1, out);
-			count = sumWords;
-		} else {
-			fputs(" --> [Re-Accel] Writing SMALL format acx...\n", stderr);
-			for (size_t i = 0; i < hashSz; ++i) {
-				for (uint32_t *P = (uint32_t*)Forest[i]; P < (uint32_t*)Forest[i+1]; P+=2) {
-					uint64_t bay = *P;
-					bay |= (uint64_t)*(P+1) << 20;
-					count += (P+1 < (uint32_t*)Forest[i+1]) ? 5 : 3;
-					fwrite(&bay, 1, (P+1 < (uint32_t*)Forest[i+1]) ? 5 : 3, out); 
-				}
-			}
-		}
-		fwrite(BadList, sizeof(*BadList), szBL, out);
-		printf("Re-wrote accelerator as '%s' [%llu byte table]\n",newName,count);
-		puts("Re-run the program with the new ACX accelerator.");
-		exit(0);
-	}
 	if (dbVer == ACC_VERSION) for (uint32_t i = 1; i <= hashSz; ++i)
 		Forest[i] = Forest[i-1] + (Lens[i-1] / 2u) * 5 + (Lens[i-1] & 1) * 3;
 	else {
 		for (uint32_t i = 1; i <= hashSz; ++i)
 			Forest[i] = Forest[i-1] + Lens[i-1] * 3;
-		setAmbigScour = setAmbigScour24;
-		setUnambigScour = setUnambigScour24;
 		postScour = postScour24;
 		puts(" --> [Accel] Using LARGE db mode...");
 	}
+#ifdef _WIN32
 	free(Lens); 
+#else
+	//madvise(Lens,sizeof(*Lens)*hashSz,MADV_DONTNEED);
+#endif
 	Rd->Accelerators = Forest;
 	Rd->badListSz = szBL;
 	Rd->BadList = BadList;
+	Rd->RawAcc = Raw; Rd->RawAcc_sz = fsz;
 }
 
+/*  This is the main alignment function. It requires a number of data structures, 
+    primarily including the queries and references and their associated information. 
+    Specifically, it is designed to operate on the EDX (db) and ACX (acclerator) data
+    structures for the references, which are (de-duplicated) clumps of 16xclumpsize
+    nucleotides in length. Each pack of queries is aligned against one "clump" at a
+    time to take advantage of the similarity of the sequences within that reference
+    and query clump and utilize the alignment speedup approaches described in the 
+    manuscript (query prefix-hopping and adaptive error-pruning), while only engaging
+    with references that have been (optionally) pre-selected by the accelerator, a
+    short k-mer hash lookup structure.
+
+    There is also significant code dedicated to "fingerprints", which are an alternative
+    filtering mechanism for selecting out references that cannot yield valid alignments.
+    It uses "micro-hashes" to count errors between tiny k-mer signatures.
+    Much of its speedup is redundant with accelerators, so it is no longer recommended.
+
+    There are a number of alignment modes specified by -m. These all utilize the same
+    alignment engine, but with a few caveats inside based on the mode. For instance,
+    "ALLPATHS" mode will return all "top" alignments for a query, but "FORAGE" must
+    return all valid alignments, even poorer ones. In this case, "FORAGE" mode must
+    skip the code sections dealing with ref prioritizing and tightening of error bounds.
+
+    CAPITALIST and BEST are similar to ALLPATHS internally -- the only difference is
+    in how the alignments are summarized after the do_alignments function runs. 
+
+    "ANY" is a short-cutted alignment mode that will return after the first valid
+    alignment is found. It basically cuts "ALLPATHS" short once the first valid alignment
+    is found. It also is the only mode that outputs results in realtime.
+
+    SOCIALIST/COMMUNIST modes were never completed in BURST.
+
+    "Prepass" is enabled by -p and supercedes all other modes if used. This mode has the 
+    most significantly different logic, as it does not satisfy the constraints of 
+    optimality that the others were designed for. It also does not perform the first
+    step in the synergistic speedup; there is no prefix filtering.
+*/
 static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data QDat, int usedb) {
 	#ifndef __SSSE3__
 	create_sse2_profiles(&RefDat);
 	#endif
 
 	// Extract the variables
+	uint64_t totQ = QDat.totQ, numUniqQ = QDat.numUniqQ, *Offset = QDat.Offset,
+		*QBins = QDat.QBins; 
 	uint32_t maxLenR = RefDat.maxLenR, totR = RefDat.totR, numRclumps = RefDat.numRclumps,
 		*ClumpLen = RefDat.ClumpLen, *RefStart = RefDat.RefStart, *RefIxSrt = RefDat.RefIxSrt,
 		*RefDedupIx = RefDat.RefDedupIx, *TmpRIX = RefDat.TmpRIX;
 	DualCoil **ProfClump = RefDat.ProfClump, **RefClump = RefDat.RefClump;
-	uint32_t totQ = QDat.totQ, maxLenQ = QDat.maxLenQ, numUniqQ = QDat.numUniqQ,
-		*Offset = QDat.Offset, maxED = QDat.maxED, maxDiv = QDat.maxDiv;
+	uint32_t maxLenQ = QDat.maxLenQ, maxED = QDat.maxED, maxDiv = QDat.maxDiv;
 	UniBin *UniBins = QDat.UniBins; 
 	ShrBin *ShrBins = QDat.ShrBins;
 	char **RefHead = RefDat.RefHead, **QHead = QDat.QHead, *SeqDumpRC = QDat.SeqDumpRC;
@@ -3888,7 +3650,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 	uint32_t taxa_parsed = RefDat.taxa_parsed; 
 	TaxPair_t *Taxonomy = RefDat.Taxonomy;
 	int taxasuppress = QDat.taxasuppress, doRC = QDat.rc, skipAmbig = QDat.skipAmbig;
-	uint32_t *BadList = RefDat.BadList, szBL = RefDat.badListSz, *QBins = QDat.QBins;
+	uint32_t *BadList = RefDat.BadList, szBL = RefDat.badListSz;
 	void **Forest = RefDat.Accelerators;
 	int quiet = QDat.quiet;
 
@@ -3896,7 +3658,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 	uint32_t qdim = maxLenQ + 1, rdim = maxLenR + 1;
 	++qdim; ++rdim; // add padding to right and bottom to eliminate loop logic
 
-	uint32_t newUniqQ = numUniqQ + ((doRC && !DO_PREPASS) ? numUniqQ : 0);
+	uint64_t newUniqQ = numUniqQ + ((doRC && !DO_PREPASS) ? numUniqQ : 0);
 	if (Xalpha && DO_FP) 
 		puts("WARNING: Fingerprints are incompatible with Xalpha and will be disabled."),
 		DO_FP = 0;
@@ -3907,9 +3669,9 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 		printf("There were %u fingerprints created for the %u unique queries.\n", Fp.nf, newUniqQ);
 		uint64_t accum_fp_n = 0, accum_len = 0; // Do stats
 		#pragma omp parallel for reduction(+:accum_fp_n)
-		for (uint32_t i = 0; i < Fp.nf; ++i) /*printf("%u\n", Fp.N[i]),*/ accum_fp_n += Fp.N[i];
+		for (uint64_t i = 0; i < Fp.nf; ++i) /*printf("%u\n", Fp.N[i]),*/ accum_fp_n += Fp.N[i];
 		#pragma omp parallel for reduction(+:accum_len)
-		for (uint32_t i = 0; i < numUniqQ; ++i) accum_len += ShrBins[i].len;
+		for (uint64_t i = 0; i < numUniqQ; ++i) accum_len += ShrBins[i].len;
 		if (newUniqQ > numUniqQ) accum_len *= 2;
 		printf("Query len: %f, FP density: %f, coverage: %f\n", (double)accum_len/newUniqQ, 
 			(double)accum_fp_n/Fp.nf, ((double)accum_fp_n/Fp.nf)/((double)accum_len/newUniqQ));
@@ -3918,36 +3680,25 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 			#pragma omp parallel for
 			for (uint32_t i = 0; i < totR; ++i) FpR.P[i] = FpR.P[FpR.Ptrs[i]];
 		}
-		free(FpR.Ptrs); // FPs are now ordered by the correct ambiguity
+		//free(FpR.Ptrs); // FPs are now ordered by the correct ambiguity
 		printf("There were %u fingerprints created for the %u references.\n", FpR.nf ?: totR, totR);
 		RP = FpR.P;
 	} else printf("Fingerprints not enabled\n");
 	
-	//uint32_t *UniqQLen, *UniqQed, *UniqDiv, *NewIX, maxDiv, *RCMap, *Umap;
-	//char **UniqQSeq;
-	// TODO: UNCOMMENT THE IF STATEMENT!
-	//if (RUNMODE == ANY || DO_PREPASS) { // preempt TmpRIX creation for inline printing
-		if (!RefIxSrt && RefDedupIx) {
-			RefIxSrt = malloc(totR * sizeof(*RefIxSrt));
-			if (!RefIxSrt) {fputs("OOM:[DA]RefIxSrt\n",stderr); exit(3);}
-			for (uint32_t i = 0; i < totR; ++i) RefIxSrt[i] = TmpRIX[RefDedupIx[i]];
-		}
-		else if (!RefIxSrt && !RefDedupIx) RefIxSrt = TmpRIX;
-	//}
-	
-	Split *RefOrder = 0; // NEW - disable
+	if (!RefIxSrt && RefDedupIx) {
+		RefIxSrt = malloc(totR * sizeof(*RefIxSrt));
+		if (!RefIxSrt) {fputs("OOM:[DA]RefIxSrt\n",stderr); exit(3);}
+		for (uint32_t i = 0; i < totR; ++i) RefIxSrt[i] = TmpRIX[RefDedupIx[i]];
+	}
+	else if (!RefIxSrt && !RefDedupIx) RefIxSrt = TmpRIX;
+
+    // Prepass mode is an ultra-fast alignment mode that may not 
+    // return optimal results. It's not a main mode, but enabled by "-pr"
 	if (DO_PREPASS) {
 		printf("Engaging prepass mode.\n");
 
 		double wtime = omp_get_wtime();
 		
-		/*RefOrder = malloc(numRclumps*sizeof(*RefOrder));
-		if (!RefOrder) {fputs("OOM:RefOrder\n",stderr); exit(3);}
-		for (uint32_t i = 0; i < numRclumps; ++i) RefOrder[i] = (Split){0,i};*/
-
-		/*Prince *p_r = FpR.P, *p_q = Fp.P;
-		uint8_t *RPops = malloc(totR*sizeof(*RPops));
-		uint32_t inc = reorder_only ? 16 : 1;*/
 		#define ITER DO_PREPASS
 		#define TOPSORTD(n,sc,ix,M,I) { \
 			uint32_t i = 0, t, v, s = sc, x = ix; \
@@ -3957,7 +3708,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 				v=I[i], I[i]=x, x = v; \
 		}
 		// redo the main prune_ed_mat16 function!
-		uint32_t doneQ = 0, quantQ = numUniqQ/100000, critQ = quantQ;
+		uint64_t doneQ = 0, quantQ = numUniqQ/100000, critQ = quantQ;
 			double rUniqQ = 100.0 / numUniqQ;
 		#pragma omp parallel
 		{
@@ -3986,7 +3737,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 			__m128i rv_v = _mm_setr_epi8(15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);
 			
 			#pragma omp for schedule(dynamic,1)
-			for (uint32_t i = 0; i < numUniqQ; ++i) {
+			for (uint64_t i = 0; i < numUniqQ; ++i) {
 				UniBin Ub = UniBins[i]; ShrBin Sb = ShrBins[Ub.six];
 				uint32_t len = Sb.len, err = Sb.ed;
 				char *s = Ub.Seq; 
@@ -4020,8 +3771,6 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 						}
 					}
 				}
-				//printf("Query (forward dir) %u had %llu matches in %u refclumps [%llu let].\n",
-				//	i, dbgCnt, wix, letCnt);
 				
 				for (uint32_t j = 0; j < ITER; ++j) FM[j] = 0;
 				for (uint32_t j = 0; j < wix; ++j) {
@@ -4029,11 +3778,9 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 					TOPSORTD(ITER,h,c,FM,FI);
 					Hash[c] = 0;
 				}
-				//printf("[%u F]: "); for (int j = 0; j < ITER; ++j) printf("%d: %u [%u], ",j,FM[j],FI[j]); printf("\n");
 				
 				char *rcPointer = Rev + revlen;
 				if (doRC) {
-					//printf("%u before: ",i); for (uint32_t j = 0; j < len; ++j) printf("%u ",s[j]); puts("");
 					for (uint32_t j = 0; j < len; j+=16) {
 						__m128i src = _mm_load_si128((void*)s + j);
 						__m128i tr = _mm_shuffle_epi8(tr_v, src); 
@@ -4041,11 +3788,9 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 						_mm_store_si128((void*)(rcPointer -= 16),sh);
 					}
 					rcPointer += 15 & (16 - (len & 15));
-					//printf("%u after:  ",i); for (uint32_t j = 0; j < len; ++j) printf("%u ",rcPointer[j]); puts("");
-
+					
 					w = 0, wix = 0, n = 0; 
 					s = rcPointer;
-					//uint32_t dbgCnt = 0, letCnt = 0;
 					if (postScour == postScour24) for (uint32_t j = 0; j < len; ++j) {
 						if (s[j] > 4) {n = 0; continue;}
 						w <<= 2, w |= s[j]-1;
@@ -4073,15 +3818,12 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 							}
 						}
 					}
-					//printf("Query (rev dir) %u had %llu matches in %u refclumps [%llu let].\n",
-					//	i, dbgCnt, wix, letCnt);
 					for (uint32_t j = 0; j < ITER; ++j) RM[j] = 0;
 					for (uint32_t j = 0; j < wix; ++j) {
 						uint32_t c = Cache[j], h = Hash[c];
 						TOPSORTD(ITER,h,c,RM,RI);
 						Hash[c] = 0;
 					}
-					//printf("[%u R] Max1 %u [%d] Max2 %u [%d]\n",i,RM[0], RI[0], RM[1], RI[1], RM[2], RI[2]);
 				}
 				#pragma omp atomic
 				++doneQ;
@@ -4090,16 +3832,6 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 				if (!*FM && !*RM) continue;
 				
 				char *query = *FM >= *RM ? Ub.Seq : rcPointer;
-				/* if (DO_HEUR) query = *FM >= *RM ? Ub.Seq : rcPointer;
-				else if (doRC) {
-					if (*FM > *RM << 1) query = Ub.Seq;
-					else if (*RM > *FM << 1) query = rcPointer;
-					else {
-						uint32_t potF = 0, potR = 0;
-						for (uint32_t j = 0; j < ITER; ++j) potF+=FM[j], potR+=RM[j];
-						query = potF >= potR ? Ub.Seq : rcPointer;
-					}
-				} */
 				
 				if (query == Ub.Seq) IXTray = FI, MXTray = FM;
 				else IXTray = RI, MXTray = RM;
@@ -4113,7 +3845,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 					uint32_t ri = IXTray[p];
 					DualCoil *RefSlide = RefClump[ri];
 					for (uint32_t w = 0; w < ClumpLen[ri]; w += 2) {
-						__m128i org = _mm_stream_load_si128((void*)(RefSlide++));
+						__m128i org = _mm_lddqu_si128((void*)(RefSlide++));
 						__m128i ex1 = _mm_and_si128(org,_mm_set1_epi8(0xF));
 						__m128i ex2 = _mm_and_si128(_mm_srli_epi16(org,4),_mm_set1_epi8(0xF));
 						_mm_store_si128((void*)(rclump+w),ex1);
@@ -4123,14 +3855,12 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 					if (RUNMODE != FORAGE) err = MIN(gmin,err);
 					errs = MIN(errs,err);
 					uint8_t *MinA = RefMin + (p << 4);
-					//int starred = 0;
 					uint32_t min = prune_ed_mat16(rclump, query, ClumpLen[ri],
 						len, rdim, Matrices, ProfClump[ri], errs, MinA);
-					if (errs < err && min == -1) //printf("Retried "),
+					if (errs < err && min == -1)
 						min = prune_ed_mat16(rclump, query, ClumpLen[ri],
 							len, rdim, Matrices, ProfClump[ri], err, MinA);
 					gmin = gmin < min ? gmin : min;
-					//printf("min = %d on clump %u\n",min,p);
 					if (min == -1) _mm_store_si128((void*)MinA,_mm_set1_epi8(-1));
 					else if (RUNMODE == ANY) {++p; break;}
 
@@ -4155,7 +3885,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 						uint32_t ri = IXTray[p];
 						DualCoil *RefSlide = RefClump[ri];
 						for (uint32_t w = 0; w < ClumpLen[ri]; w += 2) {
-							__m128i org = _mm_stream_load_si128((void*)(RefSlide++));
+							__m128i org = _mm_lddqu_si128((void*)(RefSlide++));
 							__m128i ex1 = _mm_and_si128(org,_mm_set1_epi8(0xF));
 							__m128i ex2 = _mm_and_si128(_mm_srli_epi16(org,4),_mm_set1_epi8(0xF));
 							_mm_store_si128((void*)(rclump+w),ex1);
@@ -4226,7 +3956,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 								edIxR = stIxR + ClumpLen[IXTray[k >> 4]], t;
 							if (taxa_parsed) taxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
 							if (query != Ub.Seq) t = stIxR, stIxR = edIxR, edIxR = t;
-							for (uint32_t j = Offset[Ub.six]; j < Offset[Ub.six+1]; ++j) 
+							for (uint64_t j = Offset[Ub.six]; j < Offset[Ub.six+1]; ++j) 
 								fprintf(output,"%s\t%s\t%f\t%u\t%u\t-1\t%u\t%u\t%d\t%u\t%u\t%u\t%s\n", 
 									QHead[j], RefHead[rix], fakeID, 
 									len + RefMin[k], RefMin[k], 1, len, stIxR, edIxR, 
@@ -4238,7 +3968,7 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 						if (taxa_parsed && taxon != taxBin) 
 								taxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
 						if (query != Ub.Seq) t = stIxR, stIxR = edIxR, edIxR = t;
-						for (uint32_t j = Offset[Ub.six]; j < Offset[Ub.six+1]; ++j) 
+						for (uint64_t j = Offset[Ub.six]; j < Offset[Ub.six+1]; ++j) 
 							fprintf(output,"%s\t%s\t%f\t%u\t%u\t-1\t%u\t%u\t%d\t%u\t%u\t%u\t%s\n", 
 								QHead[j], RefHead[rix], fakeID, 
 								len + RefMin[k], RefMin[k], 1, len, stIxR, edIxR, 
@@ -4261,7 +3991,10 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 
 	}
 
-	// Prep the main alignment data structures
+	// Prep the main alignment data structure, a singly-linked list.
+    // Here, we use "pods" (that are thread-specific) so that the minimal results
+    // of an alignment against a given query can be saved for futher processing
+    // after the alignment function completes. 
 	typedef struct ResultPod ResultPod;
 	struct ResultPod {
 		float score; // 4
@@ -4273,13 +4006,17 @@ static inline void do_alignments(FILE *output, Reference_Data RefDat, Query_Data
 	ResultPod ***ThreadPods = malloc(THREADS*sizeof(*ThreadPods));
 	ResultPod **BasePod = 0;
 
-	uint32_t totDone = 0, tid = 0;
+	uint64_t totDone = 0, tid = 0;
 	uint64_t totSkipped = 0;
 
 	
-
+// If the "accelerator" (ACX) file is used, the aligner uses query clumping
+// to produce a smaller, query-specific set of references to align to by
+// using the k-mer hash lookups. It maintains optimality by guaranteeing not
+// to omit valid alignments. If it cannot maintain this guarantee, it signals
+// for those queries to lapse afterward into the non-accelerator aligner. 
 if (DO_ACCEL) {
-	uint32_t QBUNCH = newUniqQ / (THREADS*128);
+	uint64_t QBUNCH = newUniqQ / (THREADS*128);
 	if (QBUNCH > 16) QBUNCH = 16;
 	if (!QBUNCH) QBUNCH = 1;
 	printf("Setting QBUNCH to %u\n",QBUNCH);
@@ -4288,33 +4025,16 @@ if (DO_ACCEL) {
 	ResultPod **Pods = calloc(newUniqQ,sizeof(*Pods)); // global container (accel only)!
 	if (!Pods) {fputs("OOM:Pods\n",stderr); exit(3);}
 	BasePod = Pods;
-	int castUcmp(const void *a, const void *b) {
-		return *(int32_t *)a - *(int32_t *)b; }
 	int RefCmp(const void *a, const void *b) {
 		Split *A = (Split *)a, *B = (Split *)b;
 		return A->i > B->i ? -1 : B->i > A->i;
-	}
-	int WrdCmp2(const void *a, const void *b) {
-		Split *A = (Split *)a, *B = (Split *)b;
-		return A->v < B->v ? -1 : B->v < A->v ? 1 : 
-			A->i < B->i ? -1 : B->i < A->i;
-		// do this with if-elses and gage difference?
-	}
-	int WrdCmp(const void *a, const void *b) {
-		Split *A = (Split *)a, *B = (Split *)b;
-		if (A->v < B->v) return -1;
-		else if (B->v < A->v) return 1;
-		else if (A->i < B->i) return -1;
-		else return B->i < A->i;
-		//return A->v < B->v ? -1 : B->v < A->v ? 1 : 
-		//	A->i < B->i ? -1 : B->i < A->i;
-		// do this with if-elses and gage difference?
 	}
 	typedef struct {int32_t v, i;} SSplit;
 	int WrdCmp3(const void *a, const void *b) {
 		SSplit *A = (SSplit *)a, *B = (SSplit *)b;
 		return A->v - B->v ?: A->i - B->i;
 	}
+    // Considering renaming this, as it shadows global iSort()
 	inline void iSort(Split *a, uint32_t n) {
 		if (n > 24) qsort(a, n, sizeof(*a),RefCmp);
 	    else for (uint32_t i = 1, j; i < n; ++i) {
@@ -4335,8 +4055,8 @@ if (DO_ACCEL) {
 				 *ShiftsBX = malloc((2*rdim)*sizeof(*ShiftsEX));
 		uint32_t *HiBound = calloc(qdim+1,sizeof(*HiBound)),
 				 *LoBound = calloc(qdim+1,sizeof(*LoBound)),
-				 *StackE = malloc(qdim*sizeof(*StackE)), // num errors
-				 *StackX = malloc(qdim*sizeof(*StackX)); // query ix in UniqQSeq
+				 *StackE = malloc(qdim*sizeof(*StackE)); // num errors
+		uint64_t *StackX = malloc(qdim*sizeof(*StackX)); // query ix in UniqQSeq
 		if (!(Matrices && ScoresEX && ShiftsEX && ShiftsBX && HiBound && LoBound && StackE && StackX)) 
 			{fputs("OOM:Aligner\n",stderr); exit(3);}
 		for (int j = 0; j < (cacheSz+2); ++j) Matrices[j*rdim].v = _mm_set1_epi8(MIN(j*GAP,255));
@@ -4353,15 +4073,16 @@ if (DO_ACCEL) {
 		if (!rclump || !Hash || !Cache || !Refs || !Word_Ix) {fputs("OOM:Hash\n",stderr); exit(3);}
 		uint32_t oldNref = 0;
 		int tid = omp_get_thread_num();
-		
+
 		#pragma omp for schedule(dynamic,1)
-		for (uint32_t z = 0; z < QBins[1]; z+= QBUNCH) {
+		for (uint64_t z = 0; z < QBins[1]; z+= QBUNCH) {
 			//memset(Hash,0,numRclumps*sizeof(*Hash));
 			for (uint32_t j = 0; j < oldNref; ++j) Refs[j].i = 0; //Bucket[j] = 0; // Bucket memset
-			uint32_t bound = MIN(z+QBUNCH,QBins[1]), nref = 0, min_mmatch = UINT32_MAX;
+			uint64_t bound = MIN(z+QBUNCH,QBins[1]);
+			uint32_t nref = 0, min_mmatch = UINT32_MAX;
 			uint32_t wix = 0, cix = 0, minlen = -1; // mlen NEW
 			UniBins[z].div = 1; // Instead of inner loop; because it trails nothing before it
-			for (uint32_t j = z; j < bound; ++j) {
+			for (uint64_t j = z; j < bound; ++j) {
 				UniBin Ub = UniBins[j]; ShrBin Sb = ShrBins[Ub.six];
 				uint32_t len = Sb.len, err = Sb.ed;
 				minlen = len < minlen ? len : minlen; // NEW
@@ -4372,9 +4093,7 @@ if (DO_ACCEL) {
 				if (DO_HEUR) DO_HEUR = (len >> 4) + 1u;
 				mmatch = mmatch > DO_HEUR ? mmatch : DO_HEUR;
 				if (mmatch < min_mmatch) min_mmatch = mmatch; // bank worst-case threshold
-				//printf("Query %u: len = %u, err = %u, runsize = %u, mmatch = %u\n", j, len, err, (len - err)/(err+1), mmatch);
-				//if (j == z) Ub.div = 1; // remove in loop below?
-				if (j >= *QBins) { //storeUnambigWords(Word_Ix, s, len, &wix, j);
+				if (j >= *QBins) { 
 					uint32_t k = 0, w = s[k++] - 1;
 					for (; k + 1 < SCOUR_N; ++k)
 						w <<= 2, w |= s[k]-1;
@@ -4393,15 +4112,16 @@ if (DO_ACCEL) {
 					storeAmbigWords(Word_Ix, s + k, &wix, j, 0, 0);
 				}
 			}
+
+            // Sorting is performed to prioritize reference clumps by 
+            // the number of hash matches.
 			qsort(Word_Ix, wix, sizeof(*Word_Ix), WrdCmp3);
 			postScour(Hash, Forest, Word_Ix, wix, Cache, &cix);
 			for (uint32_t i = 0; i < cix; ++i) {
 				uint16_t *p = Hash + Cache[i];
-				//printf("Clump %u, count %u\n",Cache[i],*p);
 				for (int z = 0; z < VECSZ; ++z) { 
 					uint32_t refIX = Cache[i] * VECSZ + z;
 					uint32_t ref = RefIxSrt[refIX];
-					//printf("--->%s [%u]\n",RefHead[ref],[insert location here]);
 				}
 				if (*p > min_mmatch) Refs[nref++] = (Split){Cache[i],*p};
 				*p = 0;
@@ -4421,7 +4141,7 @@ if (DO_ACCEL) {
 					if (usedb) { // edx rather than raw fasta? or generate edx on the fly with fasta?
 						DualCoil *RefSlide = RefClump[ri];
 						for (uint32_t w = 0; w < ClumpLen[ri]; w += 2) {
-							__m128i org = _mm_stream_load_si128((void*)(RefSlide++));
+							__m128i org = _mm_lddqu_si128((void*)(RefSlide++));
 							__m128i ex1 = _mm_and_si128(org,_mm_set1_epi8(0xF));
 							__m128i ex2 = _mm_and_si128(_mm_srli_epi16(org,4),_mm_set1_epi8(0xF));
 							_mm_store_si128((void*)(rclump+w),ex1);
@@ -4429,25 +4149,21 @@ if (DO_ACCEL) {
 						}
 					} else rclump = RefClump[ri];
 					HiBound[1] = rlen;
-					//*LoBound = -1, LoBound[1] = 1; // FDR
 					
-					uint32_t stack_ix = 0; //thisMax = 0;
+					uint32_t stack_ix = 0; 
 					*StackX = z, *StackE = -1; // initialize stack (worst case)
-					//UniBins[z].div = 1; // force first divergence to 1 (done above)
-
+					
 					int8_t fp_rediv = 0;
-					for (uint32_t j = z; j < bound; ++j) { 
+					for (uint64_t j = z; j < bound; ++j) { 
 						UniBin *Ub = UniBins + j; ShrBin *Sb = ShrBins + Ub->six;
 						uint32_t thisDiv = Ub->div, Emac = Sb->ed, len = Sb->len;
-						//uint32_t Emac = maxED;
 						//printf("Doing q #%u [%s]: div=%u, Emac = %u\n",j,QHead[Offset[Ub->six]],thisDiv,Emac);
 
 						// handle early k-term here
 						uint32_t kload = Emac*SCOUR_N + SCOUR_N, 
 							mmatch = kload < len ? len - kload : 1;
-						//uint32_t mmatch = len - Emac * SCOUR_N - SCOUR_N;
 						if (Emac == (uint16_t)-1 || (!x && Refs[i].i <= mmatch)) { // Emac to -1 in ANY mode to mark spent query
-							fp_rediv = 1; // puts("-->Skipping (mmatch)");
+							fp_rediv = 1; 
 							continue;
 						}
 						
@@ -4470,48 +4186,38 @@ if (DO_ACCEL) {
 							fp_rediv = 0;
 							if (Emac <= StackE[stack_ix]) {
 								thisDiv = 1; if (Ub->div > 1 && stack_ix) {
-									uint32_t sai = StackX[stack_ix], lenD;
+									uint64_t sai = StackX[stack_ix], lenD;
 									lenD = MIN(ShrBins[UniBins[sai].six].len, len) - 1;
 									register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq;
 									for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
 										thisQ[w] == prevQ[w]; ++w) ++thisDiv; 
 								}
 							}
-							//printf("--> fprediv: %u\n",thisDiv);
 						}
 
 						// if error tol exceed cur stack, increment stack, set this ptr
 						if (Emac > StackE[stack_ix]) {
 							while (Emac > StackE[--stack_ix]); // pop until errors <= Stack errors
 							thisDiv = 1; if (Ub->div > 1 && stack_ix) {
-								uint32_t sai = StackX[stack_ix], lenD;
+								uint64_t sai = StackX[stack_ix], lenD;
 								lenD = MIN(ShrBins[UniBins[sai].six].len, len) - 1;
 								register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq;
 								for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
 									thisQ[w] == prevQ[w]; ++w) ++thisDiv; 
 							}
-							//printf("--> rediv: %u\n",thisDiv);
 						}
-						//printf("-->stack before: ix=%u, err=%u, refix=%u ==> ",stack_ix, StackE[stack_ix],StackX[stack_ix]);
 						stack_ix += Emac < StackE[stack_ix];
 						StackX[stack_ix] = j;
 						StackE[stack_ix] = Emac;
-						//printf("ix=%u, err=%u, refix=%u\n",stack_ix, StackE[stack_ix],StackX[stack_ix]);
 						
-						DualCoil mins; //mins.v = _mm_set1_epi8(-1);
+						DualCoil mins;
 						uint32_t min;
-						//if (Xalpha) min = aded_xalpha(rclump,UniqQSeq[j],rlen,UniqQLen[ai], rdim, 
-						//	Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
-						//else 
-						//min = aded_mat16(rclump,Ub->Seq,rlen,len, rdim, // TODO: dip-n-dot, length restriction, 
-						//	Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
 						min = aded_mat16L(rclump,Ub->Seq,rlen,len, rdim, minlen,// TODO: dip-n-dot
 							Matrices, pclump, Emac,thisDiv,LoBound,HiBound,&mins); 
-						//printf("--> min = %u\n",min);
-						if (min <= Sb->ed) { // now we get serious.
-							uint32_t ai = Ub->six + (Ub->rc ? numUniqQ : 0);
+						if (min <= Sb->ed) { // now this alignment is a candidate for storage
+							uint64_t ai = Ub->six + (Ub->rc ? numUniqQ : 0);
 							if (RUNMODE != FORAGE && RUNMODE != ANY) {
-								/*if (min < Sb->ed)*/ Sb->ed = min;
+								Sb->ed = min;
 								ResultPod *prv;
 								if (Pods[ai] && min < Pods[ai]->mismatches) // purge
 									do prv = Pods[ai]->next, free(Pods[ai]), Pods[ai] = prv; while(Pods[ai]);
@@ -4541,7 +4247,8 @@ if (DO_ACCEL) {
 									stIxR = rp->finalPos - qlen + rp->numGapR + mOff,
 									edIxR = rp->finalPos + mOff;
 									if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
-									/* if (taxa_parsed) {
+									// Currently we don't parse taxonomy in "-m ANY"
+                                    /* if (taxa_parsed) {
 										char *tt = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
 										if (taxasuppress) {
 											uint32_t lm, s = 0; 
@@ -4558,7 +4265,7 @@ if (DO_ACCEL) {
 										for (uint32_t j = Offset[Ub->six]; j < Offset[Ub->six+1]; ++j) PRINT_MATCH_TAX()
 									}
 									else  */
-									if (Sb->ed != -1) for (uint32_t j = Offset[Ub->six]; j < Offset[Ub->six+1]; ++j) 
+									if (Sb->ed != -1) for (uint64_t j = Offset[Ub->six]; j < Offset[Ub->six+1]; ++j) 
 										fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", 
 										QHead[j], RefHead[rix], rp->score * 100, 
 										alLen, numMis, numGap, 1, qlen, stIxR, edIxR, 
@@ -4570,10 +4277,8 @@ if (DO_ACCEL) {
 							}
 						}
 					}
-					// tid = omp_get_thread_num();
-					// if (!tid) printf("\rSearch Progress: [%3.2f%%]",100.0 * (double)totDone / newUniqQ);
 				} // end standard
-				// switch targets from good to bad
+				// switch targets from "good" unambiguous to "bad" (ambiguous) queries
 				RefPtr = 0;
 				nref = szBL;
 			}
@@ -4583,7 +4288,6 @@ if (DO_ACCEL) {
 			totDone += (bound - z);
 		}
 		
-		//ThreadPods[omp_get_thread_num()] = Pods;
 		free(HiBound); free(LoBound); free(StackE); free(StackX); free(Matrices);
 		free(ScoresEX); free(ShiftsEX); free(ShiftsBX); //free(Pods);
 		free(Hash); 
@@ -4591,11 +4295,10 @@ if (DO_ACCEL) {
 	}
 	
 	// loop and consolidate thread pods in parallel
-	//BasePod = *ThreadPods;
 	// Fold rc into main bin
 	if (newUniqQ > numUniqQ) {
 		#pragma omp parallel for schedule(dynamic,1)
-		for (uint32_t j = numUniqQ; j < newUniqQ; ++j) {
+		for (uint64_t j = numUniqQ; j < newUniqQ; ++j) {
 			if (!BasePod[j]) continue;
 			// append this pod to end of first (if extant)
 			if (!BasePod[j-numUniqQ]) BasePod[j-numUniqQ] = BasePod[j];
@@ -4609,11 +4312,12 @@ if (DO_ACCEL) {
 	}
 	
 	if (!quiet) printf("\rSearch Progress: [%3.2f%%]\n",100.0 * (double)totDone * totQMult); // not necessarily 100.0%!
-	free(*Forest); free(Forest); free(BadList); // NEW [mem]
+	free(Forest); // The accelerator is no longer needed.
 } // end ACCEL
 
-	// do remaining queries vs all refs in traditional aligner. 
-	uint32_t firstQ = DO_ACCEL ? QBins[1] : 0;
+	// Do remaining queries vs all refs in traditional aligner. 
+    // (They either failed the accelerator guarantee or no ACX was used.)
+	uint64_t firstQ = DO_ACCEL ? QBins[1] : 0;
 	totDone = 0;
 	if (firstQ == newUniqQ || (DO_ACCEL && skipAmbig)) goto EOA;
 	else if (DO_ACCEL) UniBins[firstQ].div = 1; //UniqDiv[Umap[firstQ]] = 1;
@@ -4639,13 +4343,13 @@ if (DO_ACCEL) {
 		#pragma omp for schedule(dynamic,1) 
 		for (uint32_t i = 0; i < numRclumps; ++i) {
 			//*LoBound = -1, LoBound[1] = 1; // FDR
-			uint32_t ri = RefOrder ? RefOrder[i].i : i;
+			uint32_t ri = i;
 			uint32_t rlen = ClumpLen[ri] + 1;
 			DualCoil *pclump = ProfClump[ri];
 			if (usedb) { // edx rather than raw fasta? or generate edx on the fly with fasta?
 				DualCoil *RefSlide = RefClump[ri];
 				for (uint32_t w = 0; w < ClumpLen[ri]; w += 2) {
-					__m128i org = _mm_stream_load_si128((void*)(RefSlide++));
+					__m128i org = _mm_lddqu_si128((void*)(RefSlide++));
 					__m128i ex1 = _mm_and_si128(org,_mm_set1_epi8(0xF));
 					__m128i ex2 = _mm_and_si128(_mm_srli_epi16(org,4),_mm_set1_epi8(0xF));
 					_mm_store_si128((void*)(rclump+w),ex1);
@@ -4658,12 +4362,12 @@ if (DO_ACCEL) {
 			uint32_t stack_ix = 0; //thisMax = 0;
 			
 			int8_t fp_rediv = 0;
-			for (uint32_t j = firstQ; j < newUniqQ; ++j) { 
+			for (uint64_t j = firstQ; j < newUniqQ; ++j) { 
 				// pre-stack variables
 				UniBin *Ub = UniBins + j;
-				uint32_t qi = /*Umap ? Umap[j] :*/ j, ai = Ub->six; //qi >= numUniqQ ? RCMap[qi - numUniqQ] : qi;
+				uint64_t qi = /*Umap ? Umap[j] :*/ j, ai = Ub->six; 
 				ShrBin *Sb = ShrBins + ai;
-				uint32_t thisDiv = Ub->div, len = Sb->len; //UniqDiv[qi]; // or convert Div to single cond stor
+				uint32_t thisDiv = Ub->div, len = Sb->len;  // or convert Div to single cond stor
 				
 				uint32_t Emac = Sb->ed; //UniqQed[ai];
 				if (Emac == (uint16_t)-1) {
@@ -4689,7 +4393,7 @@ if (DO_ACCEL) {
 					fp_rediv = 0;
 					if (Emac <= StackE[stack_ix]) {
 						thisDiv = 1; if (stack_ix) {
-							uint32_t sai = StackX[stack_ix], lenD;
+							uint64_t sai = StackX[stack_ix], lenD;
 							lenD = MIN(len,ShrBins[UniBins[sai].six].len) - 1;
 							register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; 
 							for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
@@ -4702,7 +4406,7 @@ if (DO_ACCEL) {
 				if (Emac > StackE[stack_ix]) {
 					while (Emac > StackE[--stack_ix]); // pop until errors <= Stack errors
 					thisDiv = 1; if (stack_ix) {
-						uint32_t sai = StackX[stack_ix], lenD;
+						uint64_t sai = StackX[stack_ix], lenD;
 						lenD = MIN(len,ShrBins[UniBins[sai].six].len) - 1;
 						register char *thisQ = Ub->Seq, *prevQ = UniBins[sai].Seq; 
 						for (uint32_t w = 0; w < lenD && thisDiv < maxDiv && 
@@ -4787,7 +4491,7 @@ if (DO_ACCEL) {
 	if (!BasePod) {
 		BasePod = *ThreadPods;
 		#pragma omp parallel for schedule(dynamic,1)
-		for (uint32_t j = 0; j < numUniqQ; ++j) {
+		for (uint64_t j = 0; j < numUniqQ; ++j) {
 			if (!BasePod[j]) continue;
 			ResultPod *prv;
 			if (BasePod[j]->mismatches > ShrBins[j].ed) 
@@ -4798,7 +4502,7 @@ if (DO_ACCEL) {
 	
 	for (uint32_t i = BasePod==*ThreadPods; i < THREADS; ++i) {
 		#pragma omp parallel for schedule(dynamic,1)
-		for (uint32_t j = 0; j < numUniqQ; ++j) {
+		for (uint64_t j = 0; j < numUniqQ; ++j) {
 			if (!ThreadPods[i][j]) continue;
 			ResultPod *prv, *init;
 			if (ThreadPods[i][j]->mismatches > ShrBins[j].ed) {
@@ -4819,8 +4523,6 @@ if (DO_ACCEL) {
 	if (RUNMODE == ANY) return;
 	
 	printf("Search complete. Consolidating results...\n");
-	//if (totSkipped) printf("NumSkipped = %llu (%f)\n",
-	//	totSkipped,(double)totSkipped/((double)numUniqQ*numRclumps));
 	if (!RefIxSrt && RefDedupIx) {
 		printf("Constructing RefIxSrt from RefDedupIx...[totR %u, orig %u]\n",totR,RefDat.origTotR);
 		RefIxSrt = malloc(totR * sizeof(*RefIxSrt));
@@ -4833,9 +4535,10 @@ if (DO_ACCEL) {
 	#pragma omp simd reduction(max:maxIX)
 	for (uint32_t i = 0; i < totR; ++i) 
 		maxIX = RefIxSrt[i] > maxIX ? RefIxSrt[i] : maxIX;
-	//printf("Max IX for allocations = %u [totR = %u, origTotR = %u]\n",maxIX,totR,RefDat.origTotR);
 
+#ifdef _WIN32
 	free(Centroids); free(FpR.initP); free(ProfClump); free(RefClump);
+#endif
 	free(SeqDumpRC); // free a part of the query memory
 	// Remove duplicate alignments
 	uint32_t *RefMap = RefDat.RefMap;
@@ -4848,20 +4551,20 @@ if (DO_ACCEL) {
 	}
 	
 #define PRINT_MATCH() \
-	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\n", \
+	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%lu\n", \
 		QHead[j], RefHead[rix], rp->score * 100, \
 		alLen, numMis, numGap, 1, qlen, stIxR, edIxR, \
-		rp->mismatches,j > Offset[i]);
+		rp->mismatches,i);
 #define PRINT_MATCH_TAX() \
-	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%u\t%s\n", \
+	fprintf(output,"%s\t%s\t%f\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t%lu\t%s\n", \
 		QHead[j], RefHead[rix], rp->score * 100, \
 		alLen, numMis, numGap, 1, qlen, stIxR, edIxR, \
-		rp->mismatches,j > Offset[i],FinalTaxon);
+		rp->mismatches,i,FinalTaxon);
 #define DUPE_HUNT(ddix, R_C, S_C, rp, qlen, rix, mOff, stIxR, mapped, ql2, JMP) \
 	mOff = RefStart ? RefStart[rix] : 0; \
 	stIxR = rp->rc ? rp->finalPos + mOff : rp->finalPos - qlen + rp->numGapR + mOff; \
 	mapped = RefMap[rix]; \
-	for (uint32_t d = 0; d < ddix; ++d) \
+	for (uint64_t d = 0; d < ddix; ++d) \
 		if (R_C[d] == mapped && S_C[d] + ql2 > stIxR \
 			&& S_C[d] < stIxR + ql2) goto JMP; \
 	R_C[ddix] = mapped, S_C[ddix++] = stIxR; 
@@ -4869,7 +4572,7 @@ if (DO_ACCEL) {
 	mOff = RefStart ? RefStart[rix] : 0; \
 	stIxR = rp->rc ? rp->finalPos + mOff : rp->finalPos - qlen + rp->numGapR + mOff; \
 	mapped = RefMap[rix]; \
-	for (uint32_t d = 0; d < ddix; ++d) \
+	for (uint64_t d = 0; d < ddix; ++d) \
 		if (R_C[d] == mapped && S_C[d] + ql2 > stIxR && S_C[d] < stIxR + ql2) { \
 			if (X_C[d] > rp->mismatches) X_C[d] = rp->mismatches; \
 			goto JMP; \
@@ -4879,150 +4582,122 @@ if (DO_ACCEL) {
 	if (RUNMODE == ALLPATHS) {  // all on best ED path
 		uint32_t *RefCache = malloc((maxIX+1)*sizeof(*RefCache)); // N L
 		uint32_t *StCache = malloc((maxIX+1)*sizeof(*StCache)); // N L
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
+		uint32_t *RIXcache = malloc((maxIX+1)*sizeof(*RIXcache)); // N L 2
+		ResultPod **RPcache = malloc((maxIX+1)*sizeof(*RPcache)); // N L 2
+		
+		for (uint64_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = BasePod[i];
 			if (!rp) continue;
-			uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; // N L
+			uint64_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; // N L
 			ResultPod *best = rp;
 			while (rp = rp->next) if (rp->mismatches < best->mismatches) best = rp;
 			rp = best;
 			uint32_t bm = best->mismatches;
+			// NEW
+			uint64_t rix_ix = 0;
 			if (rp->score) while (rp) {
 				if (rp->mismatches == bm) { //rp->score && 
 					uint32_t rix, mOff, stIxR, mapped;
-					if (RefDedupIx) // handle dupes in refs
+					if (RefDedupIx) { // handle dupes in refs
 						for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
 							rix = TmpRIX[k];
 							DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,ALLPATHS_D_END);
-							uint32_t numGap = rp->numGapR + rp->numGapQ, 
-								numMis = rp->mismatches - numGap,
-								alLen = qlen + numGap, 
-								edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
-							if (taxa_parsed) {
-								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-							}
-							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+							RPcache[rix_ix] = rp;
+							RIXcache[rix_ix++] = rix;
 							ALLPATHS_D_END:NULL;
 						}
+					}
 					else {
 						rix = RefIxSrt[rp->refIx];
 						DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,ALLPATHS_U_END);
-						uint32_t numGap = rp->numGapR + rp->numGapQ, 
-							numMis = rp->mismatches - numGap,
-							alLen = qlen + numGap, 
-							edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
-						if (taxa_parsed) {
-							char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-							for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-						}
-						else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+						RPcache[rix_ix] = rp;
+						RIXcache[rix_ix++] = rix;
 						ALLPATHS_U_END:NULL;
 					}
 				}
 				rp = rp->next;
 			}
-		}
-	}
-	/*else if (RUNMODE == FORAGE) { // DEBUG VERSION
-		printf("Considering %u queries.\n",numUniqQ);
-
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
-			ResultPod *rp = BasePod[i];
-			printf("Query %u:\n",i);
-			while (rp) {
-				// display some info about this reference: where and what it is, then dump some accelerator stats (check to see if accel is freed earlier?)
-				
-				//if (rp->score) {
-					uint32_t rix = RefIxSrt[rp->refIx],
-					numGap = rp->numGapR + rp->numGapQ,
-					numMis = rp->mismatches - numGap,
-					qlen = ShrBins[i].len,
-					alLen = qlen + numGap,
-					mOff = RefStart ? RefStart[rix] : 0, tmp, 
-					stIxR = rp->finalPos - qlen + rp->numGapR + mOff,
-					edIxR = rp->finalPos + mOff;
-					if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
-					printf("Reference %u: \n", rix);
-					if (RefDedupIx) { // handle dupes in refs
-						printf("-->Range begin: %u, end: %u\n", RefDedupIx[rp->refIx], RefDedupIx[rp->refIx+1]);
-						for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
-							rix = TmpRIX[k];
-							mOff = RefStart ? RefStart[rix] : 0;
-							stIxR = rp->finalPos - qlen + rp->numGapR + mOff;
-							edIxR = rp->finalPos + mOff;
-							if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
-							if (taxa_parsed) {
-								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-							}
-							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
-							printf("  [%u] %s\n",k,RefHead[rix]);
-						}
-					}
-					else if (taxa_parsed) {
+			//printf("Neo-allpathicus: Formed %lu conclusions.\n",rix_ix);
+			for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) { // each query duplicate
+				for (uint64_t z = 0; z < rix_ix; ++z) { // each possible ref it aligned to
+					rp = RPcache[z]; // safe to redefine b/c finished and nulled above
+					uint32_t rix = RIXcache[z], 
+						mOff = RefStart ? RefStart[rix] : 0,
+						stIxR = rp->rc ? rp->finalPos + mOff : rp->finalPos - qlen + rp->numGapR + mOff;
+					uint32_t numGap = rp->numGapR + rp->numGapQ, 
+						numMis = rp->mismatches - numGap,
+						alLen = qlen + numGap, 
+						edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
+					if (taxa_parsed) {
 						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-						for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+						PRINT_MATCH_TAX()
+					} else { 
+						PRINT_MATCH()
 					}
-					else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
-				//}
-				rp = rp->next;
-			}
-		}
-	}*/
-	else if (RUNMODE == FORAGE) { // all valid alignments
-		printf("Considering %u queries.\n",numUniqQ);
-		uint32_t *RefCache = malloc((maxIX+1)*sizeof(*RefCache)); // N L
-		uint32_t *StCache = malloc((maxIX+1)*sizeof(*StCache)); // N L
-		uint8_t *ScCache = malloc((maxIX+1)*sizeof(*ScCache)); // N L
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
-			ResultPod *rp = BasePod[i];
-			uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; // N L
-			while (rp) {
-					uint32_t rix, mOff, stIxR, mapped;
-					if (RefDedupIx) // handle dupes in refs
-						for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
-							rix = TmpRIX[k];
-							DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,FORAGE_D_END);
-							// TODO: inline the dedupe with added functionality to take the _higher scoring_ of the dupes
-							uint32_t numGap = rp->numGapR + rp->numGapQ, 
-								numMis = rp->mismatches - numGap,
-								alLen = qlen + numGap, 
-								edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
-							if (taxa_parsed) {
-								char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-								for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-							}
-							else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
-							FORAGE_D_END:NULL; // N L
-						}
-					else {
-						rix = RefIxSrt[rp->refIx];
-						DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,FORAGE_U_END);
-						uint32_t numGap = rp->numGapR + rp->numGapQ, 
-							numMis = rp->mismatches - numGap,
-							alLen = qlen + numGap, 
-							edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
-						if (taxa_parsed) { 
-							char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
-							for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-						}
-						else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
-						FORAGE_U_END:NULL; // N L
-					}
-				rp = rp->next;
+				}
 			}
 		}
 	}
 	
+	else if (RUNMODE == FORAGE) {  // exhaustive reports
+		uint32_t *RefCache = malloc((maxIX+1)*sizeof(*RefCache)); // N L
+		uint32_t *StCache = malloc((maxIX+1)*sizeof(*StCache)); // N L
+		uint32_t *RIXcache = malloc((maxIX+1)*sizeof(*RIXcache)); // N L 2
+		ResultPod **RPcache = malloc((maxIX+1)*sizeof(*RPcache)); // N L 2
+		
+		for (uint64_t i = 0; i < numUniqQ; ++i) {
+			ResultPod *rp = BasePod[i];
+			uint64_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; // N L
+			ResultPod *best = rp;
+			// NEW
+			uint64_t rix_ix = 0;
+			while (rp) {
+				uint32_t rix, mOff, stIxR, mapped;
+				if (RefDedupIx) { // handle dupes in refs
+					for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
+						rix = TmpRIX[k];
+						DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,FORAGE_D_END);
+						RPcache[rix_ix] = rp;
+						RIXcache[rix_ix++] = rix;
+						FORAGE_D_END:NULL; // N L
+					}
+				}
+				else {
+					rix = RefIxSrt[rp->refIx];
+					DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,FORAGE_U_END);
+					RPcache[rix_ix] = rp;
+					RIXcache[rix_ix++] = rix;
+					FORAGE_U_END:NULL; // N L
+				}
+				rp = rp->next;
+			}
+			//printf("Neo-allpathicus: Formed %lu conclusions.\n",rix_ix);
+			for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) { // each query duplicate
+				for (uint64_t z = 0; z < rix_ix; ++z) { // each possible ref it aligned to
+					rp = RPcache[z]; // safe to redefine b/c finished and nulled above
+					uint32_t rix = RIXcache[z], 
+						mOff = RefStart ? RefStart[rix] : 0,
+						stIxR = rp->rc ? rp->finalPos + mOff : rp->finalPos - qlen + rp->numGapR + mOff;
+					uint32_t numGap = rp->numGapR + rp->numGapQ, 
+						numMis = rp->mismatches - numGap,
+						alLen = qlen + numGap, 
+						edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
+					if (taxa_parsed) {
+						char *FinalTaxon = taxa_lookup(RefHead[rix],taxa_parsed-1,Taxonomy);
+						PRINT_MATCH_TAX()
+					} else PRINT_MATCH()
+				}
+			}
+		}
+	}
 
 	else if (RUNMODE==CAPITALIST) {
-		uint32_t numBins = maxIX+1;
+		uint64_t numBins = maxIX+1;
 		size_t *RefCounts = calloc(numBins,sizeof(*RefCounts)), tot = 0;
 		if (!RefCounts) {fputs("OOM:RefCounts\n",stderr); exit(3);}
 		uint32_t *RefCache = malloc(numBins*sizeof(*RefCache)); // N L
 		uint32_t *StCache = malloc(numBins*sizeof(*StCache)); // N L
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
+		for (uint64_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = BasePod[i], *best = rp;
 			if (!rp) continue;
 			// Phase 1: Picking the best fund. (Set 'best' to [first] min scoring ref)
@@ -5032,8 +4707,9 @@ if (DO_ACCEL) {
 			rp = best; 
 			BasePod[i] = rp; // hedging derivative futures (start at the first 'best')
 			
-			uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; 
-			do if (rp->mismatches == best->mismatches) {
+			uint64_t ddix = 0;
+			uint32_t qlen = ShrBins[i].len, ql2 = qlen >> 1; 
+			do if (rp->mismatches == best->mismatches) { // todo: check for oddness in dupe masking with capitalist
 				uint32_t rix, mOff, stIxR, mapped;
 				if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
 					rix = TmpRIX[k];
@@ -5067,7 +4743,7 @@ if (DO_ACCEL) {
 			
 			// pass 3: deciding which investments to bank
 			#pragma omp for
-			for (uint32_t i = 0; i < numUniqQ; ++i) {
+			for (uint64_t i = 0; i < numUniqQ; ++i) {
 				if (!BasePod[i]) continue; 
 				ResultPod *rp = BasePod[i];
 				ResultPod *best = rp;
@@ -5077,7 +4753,7 @@ if (DO_ACCEL) {
 					rix, mOff, stIxR, mapped;
 
 				do {
-					if (rp->mismatches < best->mismatches) continue;
+					if (rp->mismatches > best->mismatches) continue; // TODO: CHECK THIS COMPARISON
 					if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
 						rix = TmpRIX[k];
 						DUPE_HUNT(ddix,RefCache_t,StCache_t,rp,qlen,rix,mOff,stIxR,mapped,ql2,CAPITALIST_D2_END);
@@ -5121,7 +4797,6 @@ if (DO_ACCEL) {
 
 					// Ascend tree based on divergences
 					uint32_t cutoff = tix - tix/TAXACUT; 
-					//printf("    Query: %s, cutoff = %u, tix = %u\n", QHead[NewIX[Offset[i]]], cutoff, tix);
 					uint32_t st = 0, ed = tix;
 					for (lv = 1; lv <= maxDiv; ++lv) {
 						uint32_t accum = 1;
@@ -5133,7 +4808,6 @@ if (DO_ACCEL) {
 						if (accum < cutoff) break;
 						cutoff = accum - accum/TAXACUT;
 					}
-					//for (int b = 0; b < tix; ++b) printf("%d: [%u] %s\n", b, Divergence[b], Taxa[b]); 
 					
 					// copy result up until lv-1 semicolon into Taxon, set FinalTaxon = Taxon;
 					uint32_t s = 0;
@@ -5142,7 +4816,6 @@ if (DO_ACCEL) {
 						Taxon[st] = Taxa[ed][st];
 					Taxon[st] = 0;
 					FinalTaxon = Taxon;
-					//printf("--> [ed=%u, lv=%u, cut=%u] %s\n",ed, lv, cutoff, FinalTaxon);
 					END_CAP_TAX:
 					if (taxasuppress) {
 						uint32_t lm, s = 0; 
@@ -5152,7 +4825,6 @@ if (DO_ACCEL) {
 							if (FinalTaxon[x]==';' && ++s == lm) {
 								FinalTaxon[x] = 0; break;
 							}
-						//printf("--> Best score = %f, lim= %d/%d, newtax = %s\n",best_score,lm,lv, FinalTaxon);
 					}
 				}
 				
@@ -5167,295 +4839,15 @@ if (DO_ACCEL) {
 				if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
 				
 				#pragma omp critical
-				if (taxa_parsed) for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-				else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+				if (taxa_parsed) for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+				else for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 			}
 		}
-		//free(RefCounts), free(Taxa), free(Taxon), free(Divergence);
-	}
-	else if (RUNMODE==COMMUNIST) {
-		typedef struct AlPod AlPod;
-		struct AlPod {
-			uint32_t map;
-			float ID;
-			uint16_t len;
-			uint8_t err, gaps;
-			//....
-			uint32_t start, end;
-			// ....
-			AlPod *next;
-		};
-		typedef struct {
-			char *Qname;
-			uint32_t qlen;
-			AlPod *wheel;
-		} QPod;
-		puts("COMMUNIST reporting mode invoked.");
-		/* The idea behind this is to "smooth out" coverage of bugs hit. 
-		To do this, we need to keep a tally of where queries land on their references.
-		First, allocate unique best-hits. Then using these as a guide, disambiguate 
-		queries based on where they would contribute most substantively to coverage.
-		This objective is tricky. Want to cover barren ground, but also bias toward 
-		doing so in more-covered genomes. 
-
-		1. allocate [bytes!] arrays equal to genome length
-		  1b. determine genome length...
-		2. Throw in all unique best hits
-		3. For the remainder, allocate according to objective above
-		  3a. put this read where maximizes proportion existing coverage of genome / [min?] coverage in region
-		  3b. do this in repeat until stabilized?
-		4. If communist, do second pass with all available positions [redistribute reads according to same objective, include self term as if read wasn't there]
-		*/
-
-		// Determine genome sizes
-		// RefMap is the ticket. For each [actual, including dupes!] shear, get its RefMap ix 
-		//   and compute max given current vs [length of this shear relative to its RefStart]
-		uint32_t *Osizes = calloc(RefDat.numRefHeads,sizeof(*Osizes));
-		char **Oheads = malloc((size_t)RefDat.numRefHeads*sizeof(*Oheads));
-		uint32_t qix = 0;
-		if (!Osizes || !Oheads) {fputs("ERR:OOM Oheads\n",stderr); exit(3);}
-		
-		for (uint32_t i = 0; i < totR; ++i) {
-			uint32_t len = ClumpLen[i/16];
-			uint32_t rix, mOff, stIxR, mapped;
-			if (RefDedupIx) for (uint32_t k = RefDedupIx[i]; k < RefDedupIx[i+1]; ++k) {
-				rix = TmpRIX[k];
-				mOff = RefStart ? RefStart[rix] : 0; 
-				mapped = RefMap[rix]; 
-				//printf("Mapping %u->%u->%u->%u, len=%u, mOff = %u\n",i,k,rix,mapped,len,mOff);
-				Osizes[mapped] = Osizes[mapped] > mOff + len ? Osizes[mapped] : mOff + len;
-				Oheads[mapped] = RefHead[rix];
-			}
-			else { // this branch hasn't been tested much
-				rix = RefIxSrt[i];
-				mOff = RefStart ? RefStart[rix] : 0; 
-				mapped = RefMap[rix]; 
-				Osizes[mapped] = Osizes[mapped] > mOff + len ? Osizes[mapped] : mOff + len;
-				Oheads[mapped] = RefHead[rix];
-			}
-		}
-		
-		uint32_t numBins = maxIX+1;
-		uint32_t *RefCache = malloc(numBins*sizeof(*RefCache)); // N L
-		uint32_t *StCache = malloc(numBins*sizeof(*StCache)); // N L
-		QPod **QPods = calloc(QDat.totQ,sizeof(*QPods));
-		if (!RefCache || !StCache || !QPods) {fputs("ERR:OOM QPods\n",stderr); exit(3);}
-		
-		// now we want to run through the unique ones and increment there for coverage
-		for (uint32_t i = 0; i < numUniqQ; ++i) {
-			ResultPod *rp = BasePod[i], *best = rp;
-			if (!rp) continue;
-			while (rp = rp->next) if (rp->mismatches < best->mismatches) best = rp;
-			rp = best; //BasePod[i]=rp; // lossy!
-
-			uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; 
-			// enumerate number of duplicated queries 
-			uint32_t copies = Offset[i+1]-Offset[i];
-			for (uint32_t j = 0; j < copies; ++j) {
-				QPods[qix] = malloc(sizeof(*QPods[qix]));
-				*QPods[qix] = (QPod){QHead[j],qlen,0};
-				++qix;
-			}
-			do if (rp->mismatches == best->mismatches) {
-				uint32_t rix, mOff, stIxR, mapped;
-				
-				
-					
-				if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
-					rix = TmpRIX[k];
-					DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,SOC_D_END);
-					uint32_t numGap = rp->numGapR + rp->numGapQ, 
-							numMis = rp->mismatches - numGap,
-							alLen = qlen + numGap, 
-							edIxR = rp->rc ? rp->finalPos - qlen + rp->numGapR + mOff : rp->finalPos + mOff;
-					//++RefCounts[mapped], ++tot;
-					for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) {
-						QPods[qix-copies--] = (QPod){};
-					}
-					
-					SOC_D_END:NULL;
-				}
-				else {
-					rix = RefIxSrt[rp->refIx];
-					DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,SOC_U_END);
-					//++RefCounts[mapped], ++tot;
-					SOC_U_END:NULL;
-				}
-			} while (rp = rp->next);
-		}
-		printf("COMMUNIST: Processed %llu reallocations\n", tot);
-		
-
-		//for (uint32_t i = 0; i < RefDat.numRefHeads; ++i) {
-		//	printf("%s\t%u\n",Oheads[i],Osizes[i]);
-		//}
-		
-		
-
-		exit(404);
-
-		// mostly old code follows
-		uint32_t numBins = maxIX+1;
-		//size_t *RefCounts = calloc(numBins,sizeof(*RefCounts)), tot = 0;
-		//if (!RefCounts) {fputs("OOM:RefCounts\n",stderr); exit(3);}
-		uint32_t *RefCache = malloc(numBins*sizeof(*RefCache)); // N L
-		uint32_t *StCache = malloc(numBins*sizeof(*StCache)); // N L
-		
-		/* for (uint32_t i = 0; i < numUniqQ; ++i) {
-			ResultPod *rp = BasePod[i], *best = rp;
-			if (!rp) continue;
-			// Phase 1: Picking the best fund. (Set 'best' to [first] min scoring ref)
-			while (rp = rp->next) if (rp->mismatches < best->mismatches) best = rp; //rp->score && 
-			
-			// Phase 2: Actuarial research. (Tally how much of each ref appears overall.)
-			rp = best; 
-			//BasePod[i] = rp; // hedging derivative futures (start at the first 'best')
-			
-			uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1; 
-			do if (rp->mismatches == best->mismatches) {
-				uint32_t rix, mOff, stIxR, mapped;
-				if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
-					rix = TmpRIX[k];
-					DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,CAPITALIST_D_END);
-					++RefCounts[mapped], ++tot;
-					CAPITALIST_D_END:NULL;
-				}
-				else {
-					rix = RefIxSrt[rp->refIx];
-					DUPE_HUNT(ddix,RefCache,StCache,rp,qlen,rix,mOff,stIxR,mapped,ql2,CAPITALIST_D_END);
-					++RefCounts[mapped], ++tot;
-					CAPITALIST_U_END:NULL;
-				}
-			} while (rp = rp->next);
-		}
-		printf("CAPITALIST: Processed %llu investments\n", tot);
-		#pragma omp parallel num_threads(MIN(THREADS,8))
-		{
-			int tid = omp_get_thread_num();
-			uint32_t *RefCache_t, *StCache_t;
-			if (!tid) RefCache_t = RefCache, StCache_t = StCache;
-			else RefCache_t = malloc(numBins*sizeof(*RefCache_t)),
-				StCache_t = malloc(numBins*sizeof(*StCache_t));
-			if (!RefCache_t || !StCache_t) {fputs("OOM:StCache_t",stderr); exit(3);}
-
-			char **Taxa = 0, *Taxon = 0, *FinalTaxon = 0; uint32_t *Divergence = 0; 
-			if (taxa_parsed) 
-				Taxa = malloc(numBins*sizeof(*Taxa)), 
-				Taxon = malloc(1000000),
-				Divergence = malloc(numBins*sizeof(*Divergence)), *Divergence = 0;
-			
-			// pass 3: deciding which investments to bank
-			#pragma omp for
-			for (uint32_t i = 0; i < numUniqQ; ++i) {
-				if (!BasePod[i]) continue; 
-				ResultPod *rp = BasePod[i];
-				ResultPod *best = rp;
-				uint32_t tix = 0, bestmap, bestrix;
-				float best_score = -1.f;
-				uint32_t ddix = 0, qlen = ShrBins[i].len, ql2 = qlen >> 1,
-					rix, mOff, stIxR, mapped;
-
-				do {
-					if (rp->mismatches < best->mismatches) continue;
-					if (RefDedupIx) for (uint32_t k = RefDedupIx[rp->refIx]; k < RefDedupIx[rp->refIx+1]; ++k) {
-						rix = TmpRIX[k];
-						DUPE_HUNT(ddix,RefCache_t,StCache_t,rp,qlen,rix,mOff,stIxR,mapped,ql2,CAPITALIST_D2_END);
-						if (taxa_parsed) 
-							Taxa[tix++] = taxa_lookup(RefHead[rix], taxa_parsed-1, Taxonomy),
-							best_score = rp->score > best_score ? rp->score : best_score;
-						if ( best == rp || (RefCounts[mapped] >  RefCounts[bestmap]) || 
-							 (RefCounts[mapped] == RefCounts[bestmap] && mapped < bestmap) )
-								best = rp, bestmap = mapped, bestrix = rix;
-						CAPITALIST_D2_END:NULL;
-					}
-					else {
-						rix = RefIxSrt[rp->refIx];
-						DUPE_HUNT(ddix,RefCache_t,StCache_t,rp,qlen,rix,mOff,stIxR,mapped,ql2,CAPITALIST_U2_END);
-						if (taxa_parsed) 
-							Taxa[tix++] = taxa_lookup(RefHead[rix], taxa_parsed-1, Taxonomy),
-							best_score = rp->score > best_score ? rp->score : best_score;
-						if ( best == rp || (RefCounts[mapped] >  RefCounts[bestmap]) || 
-							 (RefCounts[mapped] == RefCounts[bestmap] && mapped < bestmap) )
-								best = rp, bestmap = mapped, bestrix = rix;
-						CAPITALIST_U2_END:NULL;
-					}
-				} while (rp = rp->next);
-
-				// taxonomy interpolation pass (optional)
-				if (taxa_parsed) {
-					uint32_t lv = -1;
-					if (tix==1) {FinalTaxon = strcpy(Taxon,*Taxa); goto END_CAP_TAX;}
-					int byStr(const void *A, const void *B) {return strcmp(*(char**)A, *(char**)B);}
-					qsort(Taxa, tix, sizeof(*Taxa), byStr);
-
-					uint32_t maxDiv = 0;
-					for (int z = 1, x; z < tix; ++z) {
-						Divergence[z] = 0;
-						for (x = 0; Taxa[z-1][x] && Taxa[z-1][x]==Taxa[z][x]; ++x) 
-							Divergence[z] += Taxa[z][x] == ';';
-						Divergence[z] += !Taxa[z-1][x];
-						if (Divergence[z] > maxDiv) maxDiv = Divergence[z];
-					}
-					if (!maxDiv) {Taxon[0] = 0; FinalTaxon = Taxon; goto END_CAP_TAX;}
-
-					// Ascend tree based on divergences
-					uint32_t cutoff = tix - tix/TAXACUT; 
-					//printf("    Query: %s, cutoff = %u, tix = %u\n", QHead[NewIX[Offset[i]]], cutoff, tix);
-					uint32_t st = 0, ed = tix;
-					for (lv = 1; lv <= maxDiv; ++lv) {
-						uint32_t accum = 1;
-						for (uint32_t z = st+1; z < ed; ++z) {
-							if (Divergence[z] >= lv) ++accum;
-							else if (accum >= cutoff) {ed = z; break;}
-							else accum = 1, st = z; //, printf("reset z=%u, lv %u: %u < %u\n",z,lv,accum,cutoff);
-						}
-						if (accum < cutoff) break;
-						cutoff = accum - accum/TAXACUT;
-					}
-					//for (int b = 0; b < tix; ++b) printf("%d: [%u] %s\n", b, Divergence[b], Taxa[b]); 
-					
-					// copy result up until lv-1 semicolon into Taxon, set FinalTaxon = Taxon;
-					uint32_t s = 0;
-					if (ed) --ed; --lv;
-					for (st = 0; Taxa[ed][st] && (s += Taxa[ed][st] == ';') < lv; ++st) 
-						Taxon[st] = Taxa[ed][st];
-					Taxon[st] = 0;
-					FinalTaxon = Taxon;
-					//printf("--> [ed=%u, lv=%u, cut=%u] %s\n",ed, lv, cutoff, FinalTaxon);
-					END_CAP_TAX:
-					if (taxasuppress) {
-						uint32_t lm, s = 0; 
-						for (lm = 0; lm < lv && TAXLEVELS[lm] < best_score; ++lm);
-						if (!lm) FinalTaxon = NULLTAX;
-						else if (lm < lv) for (int x = 0; FinalTaxon[x]; ++x) 
-							if (FinalTaxon[x]==';' && ++s == lm) {
-								FinalTaxon[x] = 0; break;
-							}
-						//printf("--> Best score = %f, lim= %d/%d, newtax = %s\n",best_score,lm,lv, FinalTaxon);
-					}
-				}
-				
-				// pass 4: printing dividend reports
-				rp = best; // recovering hedge fund
-				rix = bestrix;
-				uint32_t numGap = rp->numGapR + rp->numGapQ, 
-					numMis = rp->mismatches - numGap, alLen = qlen + numGap;
-				mOff = RefStart ? RefStart[rix] : 0;
-				stIxR = rp->finalPos - qlen + rp->numGapR + mOff;
-				uint32_t tmp, edIxR = rp->finalPos + mOff;
-				if (rp->rc) tmp = stIxR, stIxR = edIxR, edIxR = tmp;
-				
-				#pragma omp critical
-				if (taxa_parsed) for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
-				else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
-			}
-		}*/
-		//free(RefCounts), free(Taxa), free(Taxon), free(Divergence);
 	}
 	else if (RUNMODE == BEST) {  // find first best score on min ED path
 		//float e = FLT_EPSILON; int sim;
 		char Taxon[UINT16_MAX] = {0}, *FinalTaxon = 0;
-	 	for (uint32_t i = 0; i < numUniqQ; ++i) {
+	 	for (uint64_t i = 0; i < numUniqQ; ++i) {
 			ResultPod *rp = BasePod[i];
 			if (!rp) continue;
 			ResultPod *best = rp;
@@ -5491,13 +4883,14 @@ if (DO_ACCEL) {
 							FinalTaxon = Taxon;
 						}
 					} else FinalTaxon = tt;
-					for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
+					for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH_TAX()
 				}
-				else for (uint32_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
+				else for (uint64_t j = Offset[i]; j < Offset[i+1]; ++j) PRINT_MATCH()
 			//}
 		}
 	}
 }
+// Function that quickly determines the file type of the input database.
 int isRefEDB(char *ref_FN) {
 	FILE *temp_handle = fopen(ref_FN, "rb");
 	if (!temp_handle) {fputs("ERROR: invalid input file.\n",stderr); exit(1);}
@@ -5514,7 +4907,7 @@ int main( int argc, char *argv[] ) {
 	char *ref_FN = 0, *query_FN = 0, *output_FN = 0, *xcel_FN = 0, *tax_FN = 0;
 	DBType dbType = QUICK;
 	RefDat.dbType = dbType;
-	printf("This is BURST ["VER"]\n");
+	printf("This is BURST ["VER" DB %d]\n",SCOUR_N);
 	if (argc < 2) PRINT_USAGE()
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i],"--references") || !strcmp(argv[i],"-r")) {
